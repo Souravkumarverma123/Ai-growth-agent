@@ -6,14 +6,19 @@
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
     "dotenv-cli": "^11.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
-    "@repo/services": "workspace:*",
     "@trpc/client": "^11.18.0",
     "@trpc/server": "^11.18.0",
     "trpc-to-openapi": "^3.3.0",
     "zod": "^4.5.4",
-    "zod-openapi": "^5.4.6"
+    "zod-openapi": "^5.4.6",
+    "@repo/policy": "workspace:*"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "dotenv -- vitest run"
   }
 }
