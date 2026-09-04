@@ -63,7 +63,10 @@ function indexCommitmentValuesByType(
  *
  * Fails closed (CONTRACTS.md §6): throws if the basket references a SKU or
  * a commitment type absent from the supplied policy data, rather than
- * silently treating it as zero and under-counting contribution.
+ * silently treating it as zero and under-counting contribution. Also throws
+ * if the same commitment type appears more than once — `commitments` is a
+ * plain array with no schema-level uniqueness constraint, and silently
+ * summing a repeated type would overstate contribution instead.
  */
 export function computeBasketContribution(
   basket: Basket,
@@ -85,7 +88,15 @@ export function computeBasketContribution(
     contributionMinor += (line.unitPriceMinor - skuPolicy.floorPriceMinor) * line.quantity;
   }
 
+  const seenCommitmentTypes = new Set<string>();
   for (const commitmentType of basket.commitments) {
+    if (seenCommitmentTypes.has(commitmentType)) {
+      throw new Error(
+        `computeBasketContribution: commitment "${commitmentType}" appears more than once on the basket`,
+      );
+    }
+    seenCommitmentTypes.add(commitmentType);
+
     const valueMinor = commitmentValuesByType.get(commitmentType);
     if (valueMinor === undefined) {
       throw new Error(

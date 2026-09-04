@@ -294,6 +294,18 @@ describe("fails closed on inconsistent policy data (CONTRACTS.md §6)", () => {
     ).toThrow(/commitment/i);
   });
 
+  it("throws rather than double-counting a commitment type repeated on the basket", () => {
+    const basketWithDuplicateCommitment: Basket = {
+      currency: "INR",
+      commitments: ["PREPAID", "PREPAID"],
+      lines: [{ skuId: SERUM_SKU_ID, quantity: 1, unitPriceMinor: 180000 }],
+    };
+
+    expect(() =>
+      computeBasketContribution(basketWithDuplicateCommitment, skuPolicies, allowedCommitments),
+    ).toThrow(/more than once/i);
+  });
+
   it("computeCounterfactualContribution also throws on a SKU absent from skuPolicies", () => {
     const basketWithUnknownSku: Basket = {
       currency: "INR",
