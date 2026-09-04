@@ -38,6 +38,7 @@
     },
     "db:generate": {},
     "db:migrate": {},
+    "db:seed": {},
     "test": {
       "dependsOn": [
         "^test"

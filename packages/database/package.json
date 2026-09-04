@@ -4,9 +4,11 @@
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",
     "db:generate": "dotenv -- drizzle-kit generate",
+    "db:seed": "dotenv -- tsx seed.ts",
     "dev": "dotenv -- drizzle-kit studio",
     "lint": "eslint .",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "dotenv -- vitest run"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
@@ -16,7 +18,8 @@
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3",
-    "eslint": "^9.39.5"
+    "eslint": "^9.39.5",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
