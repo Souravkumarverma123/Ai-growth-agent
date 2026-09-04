@@ -284,6 +284,55 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
     },
   );
 
+  it(
+    "committing a hold past its expires_at is a safe no-op, even though it is still RESERVED — it must not double-count against `available` once a later reservation has reused its slot",
+    async () => {
+      const CAMPAIGN_BUDGET_TOTAL_MINOR = 100_000;
+      const PER_DEAL_CAP_MINOR = 100_000;
+      const AMOUNT_MINOR = 70_000;
+
+      const merchantId = await insertMerchantWithPolicy({
+        campaignBudgetTotalMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
+        perDealCapMinor: PER_DEAL_CAP_MINOR,
+      });
+
+      const db = await getTestDb();
+
+      // Reserve, then expire it in place (no release), exactly as in the
+      // "excluded from `available`" case above.
+      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
+      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      await db
+        .update(campaignHoldsTable)
+        .set({ expiresAt: new Date(Date.now() - 1_000) })
+        .where(eq(campaignHoldsTable.id, holdId));
+
+      // A later reservation reuses the expired hold's excluded budget.
+      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const secondResult = await reserveCampaignBudget(db, {
+        merchantId,
+        offerId: offerId2,
+        amountMinor: AMOUNT_MINOR,
+        expiresAt: new Date(Date.now() + 600_000),
+      });
+      expect(secondResult.reserved).toBe(true);
+
+      // A late payment-capture event now tries to commit the original,
+      // still-RESERVED-but-expired hold. It must be rejected: committing it
+      // would move it into the unconditionally-counted COMMITTED state,
+      // double-counting the same budget slot the second reservation already
+      // claimed.
+      const commitResult = await commitCampaignHold(db, holdId);
+      expect(commitResult.resolved).toBe(false);
+
+      const [hold] = await db
+        .select()
+        .from(campaignHoldsTable)
+        .where(eq(campaignHoldsTable.id, holdId));
+      expect(hold!.state).toBe("RESERVED");
+    },
+  );
+
   describe("never double-released or double-committed", () => {
     it(
       "two concurrent release attempts on the same hold: exactly one wins, the other is a safe no-op",

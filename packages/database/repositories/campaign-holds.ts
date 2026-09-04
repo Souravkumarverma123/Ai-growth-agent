@@ -241,10 +241,23 @@ async function transitionHoldFromReserved(
   holdId: string,
   targetState: "RELEASED" | "COMMITTED",
 ): Promise<ResolveCampaignHoldResult> {
+  // Committing only ever applies to a hold still within its expires_at.
+  // reserveCampaignBudget's outstanding-sum already excludes a RESERVED hold
+  // once it's past expiry (treating its amount as returned to `available`
+  // for later reservations to claim); without this same cutoff here, a late
+  // commit on that same still-RESERVED-but-expired row would move it into
+  // COMMITTED, which is counted unconditionally — double-counting that
+  // budget slot against both this hold and whatever later reservation
+  // already reused it. Release has no such cutoff: it only ever removes a
+  // hold from the outstanding sum, so releasing an expired hold late is
+  // always safe.
+  const expiryCondition =
+    targetState === "COMMITTED" ? sql`AND expires_at > now()` : sql``;
+
   const result = await database.execute<CampaignHoldRow>(sql`
     UPDATE campaign_holds
     SET state = ${targetState}, resolved_at = now()
-    WHERE id = ${holdId} AND state = 'RESERVED'
+    WHERE id = ${holdId} AND state = 'RESERVED' ${expiryCondition}
     RETURNING
       id,
       merchant_id,
@@ -290,7 +303,11 @@ export async function releaseCampaignHold(
  * the frozen state machine's `SETTLED --HOLD_COMMITTED--> SETTLED` self-loop.
  *
  * A hold not currently `RESERVED` is a safe no-op: `{ resolved: false }`,
- * never a thrown error.
+ * never a thrown error. So is a hold that is still `RESERVED` but past its
+ * `expires_at`: `reserveCampaignBudget` already excludes such a hold from
+ * `available`, letting a later reservation reuse its amount, so committing
+ * it here — moving it into the unconditionally-counted `COMMITTED` state —
+ * would double-count that budget slot. Treated the same as "not resolved".
  */
 export async function commitCampaignHold(
   database: NodePgDatabase,
