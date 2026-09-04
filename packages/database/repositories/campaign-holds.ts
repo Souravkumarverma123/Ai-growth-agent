@@ -101,13 +101,25 @@ function toSelectCampaignHold(row: CampaignHoldRow): SelectCampaignHold {
  * (`@repo/policy` `evaluatePerDealCap`) first — that check is a fixed
  * ceiling on `amountMinor` alone and needs no database, so it should never
  * reach this function if it fails (PRD §17 row 3: a shortfall over the
- * per-deal cap walks away without ever touching campaign budget).
+ * per-deal cap walks away without ever touching campaign budget). That check
+ * only bounds `amountMinor` from above, so this function still validates it
+ * is a positive integer itself before opening a transaction: a non-positive
+ * or non-integer value must never reach the comparison at step 2 or the
+ * `INSERT` at step 3, since a negative amount would inflate `available` for
+ * later callers and a zero amount would consume this offer's one hold slot
+ * without reserving any real funds.
  */
 export async function reserveCampaignBudget(
   database: NodePgDatabase,
   params: ReserveCampaignBudgetParams,
 ): Promise<ReserveCampaignBudgetResult> {
   const { merchantId, offerId, amountMinor, expiresAt } = params;
+
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+    throw new Error(
+      `reserveCampaignBudget: amountMinor must be a positive integer (${amountMinor})`,
+    );
+  }
 
   return database.transaction(async (tx): Promise<ReserveCampaignBudgetResult> => {
     // Step 1: lock this merchant's policy row. Blocks until any other

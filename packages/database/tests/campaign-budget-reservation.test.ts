@@ -280,4 +280,35 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
     const outstandingMinor = await sumOutstandingMinor(merchantId);
     expect(outstandingMinor).toBe(0);
   });
+
+  it.each([
+    ["negative", -10_000],
+    ["zero", 0],
+    ["non-integer", 100.5],
+  ])(
+    "rejects a %s amountMinor before touching the database",
+    async (_label, amountMinor) => {
+      const CAMPAIGN_BUDGET_TOTAL_MINOR = 100_000;
+      const PER_DEAL_CAP_MINOR = 15_000;
+
+      const merchantId = await insertMerchantWithPolicy({
+        campaignBudgetTotalMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
+        perDealCapMinor: PER_DEAL_CAP_MINOR,
+      });
+      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 10_000 });
+      const db = await getTestDb();
+
+      await expect(
+        reserveCampaignBudget(db, {
+          merchantId,
+          offerId,
+          amountMinor,
+          expiresAt: new Date(Date.now() + 600_000),
+        }),
+      ).rejects.toThrow(/amountMinor must be a positive integer/);
+
+      const outstandingMinor = await sumOutstandingMinor(merchantId);
+      expect(outstandingMinor).toBe(0);
+    },
+  );
 });
