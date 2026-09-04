@@ -21,8 +21,11 @@ import type { MinorUnits } from "../contracts/money";
  * Pure arithmetic only: every input is already an integer in minor units
  * (see `contracts/money.ts`), and only `+`, `-`, `*` are ever used below —
  * never `/` — so no float can enter the calculation. The contracts require
- * an integer but not a *safe* one, so every step is also checked against
- * `Number.MAX_SAFE_INTEGER` and throws rather than silently rounding — no
+ * an integer but not a *safe* one, so every raw operand — not just every
+ * computed step — is checked against `Number.MAX_SAFE_INTEGER` and throws
+ * rather than silently rounding. Checking results alone would let a
+ * contract-valid unsafe operand (e.g. `unitPriceMinor` at `2^53`) slip
+ * through whenever it happens to combine into a safe-looking result; no
  * rounding is ever returned, even if a step is unrepresentable.
  */
 
@@ -106,6 +109,10 @@ export function computeBasketContribution(
         `computeBasketContribution: no SKU policy supplied for skuId "${line.skuId}"`,
       );
     }
+    requireSafeInteger(line.unitPriceMinor, `unitPriceMinor for skuId "${line.skuId}"`);
+    requireSafeInteger(skuPolicy.floorPriceMinor, `floorPriceMinor for skuId "${line.skuId}"`);
+    requireSafeInteger(line.quantity, `quantity for skuId "${line.skuId}"`);
+
     const headroomMinor = requireSafeInteger(
       line.unitPriceMinor - skuPolicy.floorPriceMinor,
       `headroom for skuId "${line.skuId}"`,
@@ -135,6 +142,7 @@ export function computeBasketContribution(
         `computeBasketContribution: no value supplied for commitment "${commitmentType}"`,
       );
     }
+    requireSafeInteger(valueMinor, `commitment value for "${commitmentType}"`);
     contributionMinor = requireSafeInteger(
       contributionMinor + valueMinor,
       `running contribution total after commitment "${commitmentType}"`,
