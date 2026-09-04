@@ -239,6 +239,51 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
     expect(followupResult.reserved).toBe(false);
   });
 
+  it(
+    "a RESERVED hold past its expires_at is excluded from `available` even without an explicit release",
+    async () => {
+      const CAMPAIGN_BUDGET_TOTAL_MINOR = 100_000;
+      const PER_DEAL_CAP_MINOR = 100_000;
+      const AMOUNT_MINOR = 70_000;
+
+      const merchantId = await insertMerchantWithPolicy({
+        campaignBudgetTotalMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
+        perDealCapMinor: PER_DEAL_CAP_MINOR,
+      });
+
+      const db = await getTestDb();
+
+      // Reserve, then simulate an abandoned offer by moving expires_at into
+      // the past directly — no `releaseCampaignHold` call, so the row stays
+      // RESERVED. Nothing in this codebase currently sweeps it to RELEASED.
+      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
+      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      await db
+        .update(campaignHoldsTable)
+        .set({ expiresAt: new Date(Date.now() - 1_000) })
+        .where(eq(campaignHoldsTable.id, holdId));
+
+      // A second reservation that would only fit if the first hold's amount
+      // were excluded must still succeed, because that first hold is expired.
+      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const secondResult = await reserveCampaignBudget(db, {
+        merchantId,
+        offerId: offerId2,
+        amountMinor: AMOUNT_MINOR,
+        expiresAt: new Date(Date.now() + 600_000),
+      });
+      expect(secondResult.reserved).toBe(true);
+
+      // The expired hold's row is untouched (still RESERVED) — this is
+      // exclusion from the availability sum, not an implicit release.
+      const [expiredHold] = await db
+        .select()
+        .from(campaignHoldsTable)
+        .where(eq(campaignHoldsTable.id, holdId));
+      expect(expiredHold!.state).toBe("RESERVED");
+    },
+  );
+
   describe("never double-released or double-committed", () => {
     it(
       "two concurrent release attempts on the same hold: exactly one wins, the other is a safe no-op",

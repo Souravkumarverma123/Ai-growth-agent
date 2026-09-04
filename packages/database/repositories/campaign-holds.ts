@@ -141,11 +141,25 @@ export async function reserveCampaignBudget(
     // other concurrent reservation attempt for this merchant is either
     // already committed (and counted here) or still blocked on step 1 (and
     // therefore cannot have inserted anything yet). Never stale.
+    //
+    // A RESERVED hold past its expires_at is excluded here even though
+    // nothing has flipped its state to RELEASED: the session-level
+    // orchestration that would call `releaseCampaignHold` on TTL elapse
+    // doesn't exist yet (see the TICKET-108 module comment below), and
+    // `campaignHoldsTable.expiresAt`'s own doc comment ("An abandoned offer
+    // returns its budget on expiry") is a hold-visible invariant, not
+    // something that may wait on that orchestration landing. Without this,
+    // an abandoned offer's hold would count against budget forever.
+    // COMMITTED holds have no such carve-out — they're a permanent spend,
+    // not a provisional one, and are never time-limited.
     const outstandingResult = await tx.execute<{ outstanding_minor: string }>(sql`
       SELECT COALESCE(SUM(amount_minor), 0) AS outstanding_minor
       FROM campaign_holds
       WHERE merchant_id = ${merchantId}
-        AND state IN ('RESERVED', 'COMMITTED')
+        AND (
+          state = 'COMMITTED'
+          OR (state = 'RESERVED' AND expires_at > now())
+        )
     `);
 
     const outstandingMinor = Number(outstandingResult.rows[0]?.outstanding_minor ?? 0);
