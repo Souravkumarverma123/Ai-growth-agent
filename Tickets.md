@@ -977,7 +977,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-507 — Seed data and demo fixtures
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-003, TICKET-004
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-003, TICKET-004
 
 **Objective.** One catalogue that tests and the demo both use.
 
