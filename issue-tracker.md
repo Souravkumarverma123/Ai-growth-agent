@@ -71,7 +71,7 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## ISSUE-003 — TICKET-001's database test harness was never built, despite being marked DONE
 
-Status: OPEN
+Status: FIXED
 Severity: MEDIUM
 Found in: TICKET-507 (pre-check, before starting)
 Date: 2026-09-04
@@ -99,19 +99,27 @@ No product invariant is broken. But every ticket that needs seam 1 — TICKET-10
 
 ### Fix
 
-Not yet fixed. Interim, scoped workaround given to TICKET-507 (which needs a DB test now and would otherwise be blocked): seed and verify directly against the real `dev` database via the existing `DATABASE_URL` — no separate test database needed for that one ticket, since seeding `dev` is the ticket's actual deliverable. The general fix — a shared, reusable real-Postgres test harness — is still needed before TICKET-107, which hard-requires real concurrency against a real database.
+Fixed. Built the shared real-Postgres test harness TICKET-001 originally promised, at `packages/database/testing/db.ts`, with **no changes to `docker-compose.yml` or `.github/workflows/ci.yml`** — both already run a single Postgres server reachable at `DATABASE_URL`, and that is all this design needs:
+
+- On first use in a process, the harness derives a sibling database name from `DATABASE_URL` (`dev` → `dev_test`, on the exact same Postgres server) and, connecting to the server's built-in `postgres` administrative database, creates it if it does not already exist. Postgres has no `CREATE DATABASE IF NOT EXISTS` and a database name cannot be a bind parameter, so this is guarded with a `pg_database` pre-check plus a catch on Postgres error code `42P04` (`duplicate_database`) for the race between parallel test workers or CI runs — every other error still propagates (CONTRACTS.md §6: fail closed, don't swallow the unexpected).
+- It then applies the real Drizzle migrations to that sibling database programmatically, via `drizzle-orm/node-postgres/migrator`'s `migrate()` pointed at `packages/database/drizzle` — the same folder `drizzle-kit generate` already writes to. No new SQL migration files; the schema is identical to `dev`'s.
+- Two isolation strategies are exported for tests to pick from: `withRollback` (open a transaction, run inside it, always roll back — including the DDL, since Postgres DDL is transactional) for the common case, and `truncateAllTables` (clear every committed row in `public`, migrations bookkeeping in the separate `drizzle` schema untouched) for tests that must observe real commits across separate connections, e.g. TICKET-107's concurrency test.
+- The real `dev` database (TICKET-507's seed data) is never touched by any of this — the harness only ever opens a connection to `dev_test` or, transiently, to the admin `postgres` database to issue `CREATE DATABASE`.
+
+Verified end-to-end, not just in theory: dropped the `dev_test` database, ran `pnpm --filter @repo/database test`, and confirmed via `psql` that the harness recreated `dev_test` from scratch and applied all 3 migrations (matching `packages/database/drizzle/meta/_journal.json` exactly) before the smoke test suite ran against it; `tests/seed.test.ts` continued passing unmodified against the real `dev` database in the same run.
 
 ### Regression Test
 
-None yet — the eventual fix's own regression test is the smoke test TICKET-001 originally specified.
+`packages/database/tests/db-harness.test.ts` — asserts `TEST_DATABASE_URL` differs from `DATABASE_URL` and resolves to the expected `_test`-suffixed sibling; asserts `SELECT current_database()` through the harness's client actually returns that sibling name; opens a transaction via `withRollback`, creates a throwaway table and row inside it, confirms it's visible inside the transaction, then confirms the table does not exist at all afterwards (proving both data and DDL roll back); and asserts `truncateAllTables` clears a committed row from a throwaway table without dropping it.
 
 ### Related Ticket
 
-TICKET-001 (unmet), TICKET-507 (worked around), TICKET-107 (will hit this next)
+TICKET-001 (unmet, now delivered), TICKET-507 (worked around, unaffected), TICKET-107 (unblocked — can now build its real-concurrency test on `withRollback`/`truncateAllTables` against `dev_test`)
 
 ### Status History
 
 - 2026-09-04: OPEN
+- 2026-09-05: FIXED — built the sibling-database (`dev_test`) real-Postgres test harness at `packages/database/testing/db.ts`, no docker-compose or CI changes needed, with regression test `packages/database/tests/db-harness.test.ts`.
 
 ---
 

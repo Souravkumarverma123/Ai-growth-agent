@@ -66,6 +66,8 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 **Gap noted 2026-09-04 (ISSUE-003):** the test-database strategy and DB-harness smoke test described above were never actually built — no second Postgres database exists and no smoke test exists anywhere in the repo. `packages/policy` and `packages/trpc` are the only packages with tests, and neither touches a database. TICKET-507 works around this by seeding and verifying directly against the real `dev` database. A proper shared real-Postgres test harness is still needed before TICKET-107's concurrency test.
 
+**Update 2026-09-05:** ISSUE-003 is fixed. The harness now exists at `packages/database/testing/db.ts` — a sibling `dev_test` database on the same Postgres server as `DATABASE_URL`, created and migrated idempotently on first use, with `withRollback` and `truncateAllTables` isolation helpers, and its own smoke test at `packages/database/tests/db-harness.test.ts`. TICKET-107's concurrency test can build directly on this (`truncateAllTables` for the commit-visible-across-connections case its test needs) instead of inventing its own approach.
+
 **Parallelization.** None — first ticket.
 
 **References.** PRD §21; Settled by: Q26
