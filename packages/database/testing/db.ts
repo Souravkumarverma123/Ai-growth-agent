@@ -45,9 +45,7 @@ function withDatabaseName(url: string, databaseName: string): string {
 }
 
 const devDatabaseName = databaseNameOf(env.DATABASE_URL);
-const testDatabaseName = devDatabaseName.endsWith(TEST_DB_SUFFIX)
-  ? devDatabaseName
-  : `${devDatabaseName}${TEST_DB_SUFFIX}`;
+const testDatabaseName = `${devDatabaseName}${TEST_DB_SUFFIX}`;
 
 /** Same server as DATABASE_URL, a different database, never the one "dev" data lives in. */
 export const TEST_DATABASE_URL = withDatabaseName(env.DATABASE_URL, testDatabaseName);
