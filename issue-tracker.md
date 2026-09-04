@@ -69,6 +69,130 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-004 — The "recommended" single-CTE-statement campaign-budget reservation over-admits under real concurrency
+
+Status: FIXED
+Severity: CRITICAL
+Found in: TICKET-107
+Date: 2026-09-05
+Violates invariant: 7 (campaign spend cannot exceed per-deal or campaign limits), 8 (campaign budget reservations are atomic)
+
+### Problem
+
+TICKET-107 suggested, as "the recommended shape" (while explicitly allowing a
+different design "if you're confident it's still genuinely atomic... but you
+must actually prove that with the concurrency test"), a single SQL statement:
+
+```sql
+WITH locked_policy AS (
+  SELECT campaign_budget_total_minor FROM merchant_policies
+  WHERE merchant_id = $1 FOR UPDATE
+),
+outstanding AS (
+  SELECT COALESCE(SUM(amount_minor), 0) AS outstanding_minor
+  FROM campaign_holds
+  WHERE merchant_id = $1 AND state IN ('RESERVED', 'COMMITTED')
+)
+INSERT INTO campaign_holds (...)
+SELECT ... FROM locked_policy, outstanding
+WHERE locked_policy.campaign_budget_total_minor - outstanding.outstanding_minor >= $amount
+RETURNING ...
+```
+
+This was implemented exactly as described and run against the ticket's own
+required real-Postgres concurrency test: 20 concurrent reservations of
+₹100 each against a ₹1,000 campaign budget (each individually within the
+per-deal cap; jointly ₹2,000, double the budget; expected exactly 10 to
+succeed). The test failed: 18 of 20 succeeded, meaning the campaign budget
+was jointly overspent by 80% — the exact failure mode this ticket exists to
+prevent.
+
+### Expected
+
+Exactly 10 of 20 concurrent reservations succeed; `available` never goes
+negative; the invariant holds regardless of how many callers race it.
+
+### Actual
+
+18 of 20 succeeded, reproducibly across repeated runs.
+
+### Root Cause
+
+PostgreSQL fixes one MVCC snapshot per *statement* under READ COMMITTED
+(the default, and what this project uses). `SELECT ... FOR UPDATE`'s
+wait-then-recheck behaviour (EvalPlanQual) only re-fetches and re-evaluates
+the *specific row it was blocked on* (the `merchant_policies` row here) once
+the lock is granted — it does not take a fresh snapshot for the rest of the
+statement. The `outstanding` CTE reads a different table (`campaign_holds`)
+that is not the locked row, so it kept using the *original* snapshot taken
+before the statement blocked on the lock. Under real concurrency, many of
+the 20 attempts had already opened their statement (and taken their
+snapshot) before the first one committed, so their view of `outstanding`
+stayed stale — missing holds committed by other transactions while they were
+queued waiting for the row lock — and several of them independently
+concluded there was room when there no longer was.
+
+This is a genuine, load-bearing gap in the ticket's suggested "recommended
+shape," not a design preference: the single-statement CTE pattern is unsafe
+for this specific case (locking one table while aggregating an unrelated
+one in the same statement), even though superficially similar
+lock-then-conditionally-write patterns are safe in other contexts.
+
+### Impact
+
+Had this shipped, two or more concurrent negotiations could jointly reserve
+more campaign budget than a merchant approved — a direct violation of PRD
+§21 invariants 7 and 8, and of PRD §6.5's stated defense ("two concurrent
+negotiations cannot jointly overspend"). Caught before merge by the ticket's
+own required concurrency test; never reached `dev` or any real merchant
+data.
+
+### Fix
+
+Applied. `packages/database/repositories/campaign-holds.ts`'s
+`reserveCampaignBudget` now runs three sequential statements inside one
+`database.transaction(...)`, not one SQL statement:
+
+1. `SELECT campaign_budget_total_minor FROM merchant_policies WHERE
+   merchant_id = $1 FOR UPDATE` — acquires the row lock, blocking until any
+   other in-flight reservation for this merchant commits.
+2. A **separate** statement summing `campaign_holds` for RESERVED/COMMITTED
+   states. Because it is a new statement, READ COMMITTED gives it a fresh
+   snapshot taken only after step 1 has the lock — and every other
+   concurrent attempt for this merchant is either already committed (visible
+   here) or still blocked on its own step 1 (and therefore cannot have
+   inserted anything yet). Never stale.
+3. A conditional `INSERT`, still inside the same transaction and therefore
+   still holding the lock from step 1, so nothing can interleave between
+   the read in step 2 and this write.
+
+This still satisfies "not read, then check, then write" in the sense that
+matters — no concurrent transaction can observe or mutate this merchant's
+outstanding holds between this transaction's read and its write — using
+three statements under one lock instead of one statement, because the
+one-statement version was measured to be unsafe.
+
+### Regression Test
+
+`packages/database/tests/campaign-budget-reservation.test.ts` — the
+20-concurrent-reservations test itself is the regression test: it asserts
+exactly 10 of 20 succeed, every successful hold is distinct, and the final
+`available` (`total − Σ(RESERVED/COMMITTED amount_minor)`) equals the exact
+expected arithmetic (0), not merely "≥ 0."
+
+### Related Ticket
+
+TICKET-107 (found and fixed here)
+
+### Status History
+
+- 2026-09-05: OPEN — discovered by the ticket's own required concurrency test.
+- 2026-09-05: FIXED — reservation rewritten as three statements under one
+  row-locked transaction; concurrency test passes consistently across
+  repeated runs.
+
+---
+
 ## ISSUE-003 — TICKET-001's database test harness was never built, despite being marked DONE
 
 Status: FIXED

@@ -347,7 +347,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-107 — Campaign budget accounting with atomic reservation
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 0
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 0
 
 **Objective.** Make joint overspend impossible under concurrency.
 
