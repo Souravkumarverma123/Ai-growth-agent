@@ -252,7 +252,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-103 — Candidate generator
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-102
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-102
 
 **Objective.** Produce a bounded, deterministic, capped candidate set.
 
