@@ -343,7 +343,7 @@ export async function commitCampaignHold(
     const result = await tx.execute<CampaignHoldRow>(sql`
       UPDATE campaign_holds
       SET state = 'COMMITTED', resolved_at = now()
-      WHERE id = ${holdId} AND state = 'RESERVED' AND expires_at > now()
+      WHERE id = ${holdId} AND state = 'RESERVED' AND expires_at > clock_timestamp()
       RETURNING
         id,
         merchant_id,
