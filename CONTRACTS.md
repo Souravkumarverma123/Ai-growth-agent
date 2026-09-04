@@ -146,7 +146,7 @@ Tests assert **external behaviour**, never internal structure.
 
 - Every procedure carries `.meta({ openapi: { method, path, tags } })` so it appears in the public OpenAPI document and Scalar reference. The public surface is a deliverable, not a side effect.
 - Input and output schemas are always explicit zod. No inferred outputs.
-- Use `generatePath` with an area base, as the existing `auth` route does.
+- Use `generatePath` with an area base, as the existing `negotiation` and `merchant` routes do.
 - **Nothing on the buyer-facing surface may serialize a floor price, an available budget figure, a per-deal cap, or a concession-curve value.** An agent that negotiates a hundred times must learn nothing it could not learn in one.
 
 ---
@@ -160,3 +160,37 @@ Tests assert **external behaviour**, never internal structure.
 5. No frozen contract was changed.
 6. Any problem found on the way is recorded in `issue-tracker.md`, not silently fixed.
 7. Ticket status updated in `Tickets.md`.
+
+---
+
+## 11. Merge gate
+
+Every PR — agent-raised or human-raised — clears three layers, in this order. A layer exists only to catch what the layer before it cannot.
+
+### 11.1 CI (`.github/workflows/ci.yml`) — required, mechanical, non-negotiable
+
+Runs `pnpm check-types`, `pnpm lint` (the boundary rules from §2), and `pnpm test` (every invariant suite that has landed) against a real Postgres. **This must pass before anyone — human or AI — spends time reading the diff.** A reviewer's job is never to notice the pipeline is red; GitHub should refuse the merge button first. Turn on required status checks for the `verify` job on `main` once this workflow lands.
+
+CI proves the mechanical claims: no model SDK inside `packages/policy`, no float money, the reason-code enum unbroken, whatever invariant tests exist. It cannot prove anything semantic — that a candidate generator secretly reads conversation content, that a budget reservation is read-then-write instead of atomic, that a numeric field was smuggled into `NegotiationIntent` under a different name. That is what layers two and three are for.
+
+### 11.2 AI review (e.g. Graphite Diamond) — first pass on everything else
+
+A generic AI reviewer is well suited to code quality, obvious bugs, and anything statically visible in a diff — but it does not know this project's invariants unless taught them. **Feed it this file as a custom rule set** (Diamond supports plain-language custom rules from its dashboard) rather than relying on its defaults. At minimum, teach it to flag:
+
+- Any diff touching `packages/policy/contracts/`, `packages/database/models/`, or the router signatures in `packages/trpc/server/routes/*/route.ts` — a frozen-contract change requiring explicit human sign-off (§1), never a routine approval.
+- Any new field added to `NegotiationIntent` (§5.1) — it must never gain a numeric field.
+- Any new import into `packages/policy` or `packages/payments` from a model SDK, or into `packages/agent` from `@repo/payments` (§2) — CI's lint step already fails these, so this is a redundant tripwire, not the primary defense.
+- Any function that creates a payment-rail order taking more than one parameter (§2, B3).
+- Any money field typed as a float, or a percentage stored as an integer instead of a `[0, 1]` fraction (§3).
+- A state transition with no reason code, or a reason code that is not one of the 28 in `packages/policy/contracts/reason-codes.ts`.
+
+### 11.3 Human — the residual, not the whole job
+
+If layers one and two are wired correctly, what is left for a human is narrow: the product judgment calls neither a test nor an AI reviewer can make.
+
+- Does the diff touch a frozen contract? If yes, this is a `NEEDS_SPEC_DECISION`-caliber change (`issue-tracker.md`), not a routine review — stop and decide deliberately, don't wave it through because the rest of the PR looks fine.
+- Does every acceptance criterion in the ticket have a **behavioural** test backing it — one that asserts an outcome, not that a function was called with certain arguments (§8)?
+- Is a problem the author clearly hit recorded in `issue-tracker.md`, or does the PR description suggest something was quietly patched over instead?
+- Does the PR do only what its ticket says? Scope that grew mid-flight is a sign a contract was informally renegotiated in code rather than in `PRD.md`.
+
+**"No issue found, merge it" is safe exactly when — and only when — layers one and two are both actually in place and passing.** Treat a PR with a red CI check or an un-configured AI reviewer as unreviewed, no matter how clean the diff looks.

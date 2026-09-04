@@ -1,0 +1,69 @@
+name: CI
+
+# The required gate for every PR, including ones opened by agents.
+#
+# This exists so that "no issue found on review" and "safe to merge" are the
+# same statement. Without it, a PR can look clean in a diff while failing
+# check-types, lint (including the CONTRACTS.md boundary rules — B1: the
+# policy engine importing no model SDK is enforced here, not by a reviewer
+# reading imports), or the invariant test suites. A reviewer — human or AI —
+# should never be the thing standing between a broken boundary rule and main.
+#
+# Postgres is provisioned because CONTRACTS.md's seam 1 (the tRPC caller
+# against a real Postgres) is the primary test seam for Phase 1 onward, and
+# TICKET-107's concurrency test explicitly requires a real database rather
+# than a simulated one.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/dev
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      - name: Type-check
+        run: pnpm check-types
+
+      - name: Lint — includes the frozen boundary rules (CONTRACTS.md §2)
+        run: pnpm lint
+
+      - name: Test — includes the invariant suites (PRD §21) as they land
+        run: pnpm test

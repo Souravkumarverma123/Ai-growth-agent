@@ -9,10 +9,16 @@ import { negotiationSessionsTable, negotiationStateEnum, reasonCodeEnum } from "
  * this table. Every state transition writes exactly one row carrying exactly
  * one reason code.
  *
+ * This is also enforced in the database, not just in application code: see
+ * migration 0002_audit_events_append_only.sql, which installs BEFORE
+ * UPDATE/DELETE triggers on audit_events that reject any such statement
+ * regardless of which role or client issues it.
+ *
  * LIMITATION, STATED OPENLY: the hash chain is SELF-ANCHORED. An attacker with
- * write access to this database could rewrite the whole chain consistently and
- * it would still verify. External anchoring is an extension point, not an MVP
- * claim — do not overstate this in code, UI copy, or the demo.
+ * enough privilege to disable/drop the triggers above and write access to this
+ * database could rewrite the whole chain consistently and it would still
+ * verify. External anchoring is an extension point, not an MVP claim — do not
+ * overstate this in code, UI copy, or the demo.
  */
 export const auditEventsTable = pgTable(
   "audit_events",
