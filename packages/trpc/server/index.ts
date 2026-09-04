@@ -1,11 +1,15 @@
 import { router } from "./trpc";
 
 import { healthRouter } from "./routes/health/route";
-import { authRouter } from "./routes/auth/route";
+import { negotiationRouter } from "./routes/negotiation/route";
+import { merchantRouter } from "./routes/merchant/route";
+import { auditRouter } from "./routes/audit/route";
 
 export const serverRouter = router({
   health: healthRouter,
-  auth: authRouter,
+  negotiation: negotiationRouter,
+  merchant: merchantRouter,
+  audit: auditRouter,
 });
 
 export { createContext } from "./context";
