@@ -269,6 +269,66 @@ describe("rounding is exact — no float ever enters the calculation", () => {
   });
 });
 
+describe("fails closed on precision loss beyond Number.MAX_SAFE_INTEGER (CONTRACTS.md §6)", () => {
+  it("throws instead of silently rounding a line whose price × quantity exceeds MAX_SAFE_INTEGER", () => {
+    const hugeQuantitySkuId = SERUM_SKU_ID;
+    const basketWithOverflowingLine: Basket = {
+      currency: "INR",
+      commitments: [],
+      lines: [
+        {
+          skuId: hugeQuantitySkuId,
+          // (180000 - 110000) * quantity overflows Number.MAX_SAFE_INTEGER.
+          quantity: Math.ceil(Number.MAX_SAFE_INTEGER / 70000) + 1,
+          unitPriceMinor: 180000,
+        },
+      ],
+    };
+
+    expect(() =>
+      computeBasketContribution(basketWithOverflowingLine, skuPolicies, allowedCommitments),
+    ).toThrow(/safe integer/i);
+  });
+
+  it("throws instead of silently rounding a running total that overflows across lines", () => {
+    const nearMaxSkuPolicies: SkuPolicy[] = [
+      {
+        ...skuPolicies[0],
+        floorPriceMinor: 0,
+      },
+      {
+        ...skuPolicies[1],
+        floorPriceMinor: 0,
+      },
+    ];
+    const basketWithOverflowingTotal: Basket = {
+      currency: "INR",
+      commitments: [],
+      lines: [
+        { skuId: SERUM_SKU_ID, quantity: 1, unitPriceMinor: Number.MAX_SAFE_INTEGER },
+        { skuId: CLEANSER_SKU_ID, quantity: 1, unitPriceMinor: 2 },
+      ],
+    };
+
+    expect(() =>
+      computeBasketContribution(basketWithOverflowingTotal, nearMaxSkuPolicies, allowedCommitments),
+    ).toThrow(/safe integer/i);
+  });
+
+  it("stays exact right up to Number.MAX_SAFE_INTEGER without throwing", () => {
+    const atLimitSkuPolicies: SkuPolicy[] = [{ ...skuPolicies[0], floorPriceMinor: 0 }];
+    const basketAtLimit: Basket = {
+      currency: "INR",
+      commitments: [],
+      lines: [{ skuId: SERUM_SKU_ID, quantity: 1, unitPriceMinor: Number.MAX_SAFE_INTEGER }],
+    };
+
+    expect(computeBasketContribution(basketAtLimit, atLimitSkuPolicies, allowedCommitments)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+  });
+});
+
 describe("fails closed on inconsistent policy data (CONTRACTS.md §6)", () => {
   it("throws rather than silently under-counting a basket line with no matching SKU policy", () => {
     const basketWithUnknownSku: Basket = {

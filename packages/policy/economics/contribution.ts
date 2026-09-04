@@ -20,8 +20,10 @@ import type { MinorUnits } from "../contracts/money";
  *
  * Pure arithmetic only: every input is already an integer in minor units
  * (see `contracts/money.ts`), and only `+`, `-`, `*` are ever used below —
- * never `/` — so no float can enter the calculation and no rounding is ever
- * required.
+ * never `/` — so no float can enter the calculation. The contracts require
+ * an integer but not a *safe* one, so every step is also checked against
+ * `Number.MAX_SAFE_INTEGER` and throws rather than silently rounding — no
+ * rounding is ever returned, even if a step is unrepresentable.
  */
 
 /**
@@ -46,6 +48,25 @@ function indexCommitmentValuesByType(
     byType.set(commitment.commitmentType, commitment.valueMinor);
   }
   return byType;
+}
+
+/**
+ * Fails closed on precision loss (PRD §6.3, CONTRACTS.md §6): `MinorUnits` is
+ * a plain `number`, and the money/quantity contracts only require an integer
+ * — not a *safe* integer — so a contract-valid basket can carry values whose
+ * product exceeds `Number.MAX_SAFE_INTEGER`. Left unchecked, that would
+ * silently round instead of throwing, which is indistinguishable from a
+ * correct result and breaks this module's "no rounding is ever required"
+ * guarantee. Every arithmetic step below is checked against that boundary
+ * instead of assuming it from contract validity alone.
+ */
+function requireSafeInteger(value: number, description: string): MinorUnits {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `computeBasketContribution: ${description} is not a safe integer (${value}); precision would be lost`,
+    );
+  }
+  return value;
 }
 
 /**
@@ -85,7 +106,18 @@ export function computeBasketContribution(
         `computeBasketContribution: no SKU policy supplied for skuId "${line.skuId}"`,
       );
     }
-    contributionMinor += (line.unitPriceMinor - skuPolicy.floorPriceMinor) * line.quantity;
+    const headroomMinor = requireSafeInteger(
+      line.unitPriceMinor - skuPolicy.floorPriceMinor,
+      `headroom for skuId "${line.skuId}"`,
+    );
+    const lineContributionMinor = requireSafeInteger(
+      headroomMinor * line.quantity,
+      `line contribution for skuId "${line.skuId}"`,
+    );
+    contributionMinor = requireSafeInteger(
+      contributionMinor + lineContributionMinor,
+      "running contribution total",
+    );
   }
 
   const seenCommitmentTypes = new Set<string>();
@@ -103,7 +135,10 @@ export function computeBasketContribution(
         `computeBasketContribution: no value supplied for commitment "${commitmentType}"`,
       );
     }
-    contributionMinor += valueMinor;
+    contributionMinor = requireSafeInteger(
+      contributionMinor + valueMinor,
+      `running contribution total after commitment "${commitmentType}"`,
+    );
   }
 
   return contributionMinor;
