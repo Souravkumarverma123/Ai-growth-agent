@@ -141,11 +141,25 @@ export async function reserveCampaignBudget(
     // other concurrent reservation attempt for this merchant is either
     // already committed (and counted here) or still blocked on step 1 (and
     // therefore cannot have inserted anything yet). Never stale.
+    //
+    // A RESERVED hold past its expires_at is excluded here even though
+    // nothing has flipped its state to RELEASED: the session-level
+    // orchestration that would call `releaseCampaignHold` on TTL elapse
+    // doesn't exist yet (see the TICKET-108 module comment below), and
+    // `campaignHoldsTable.expiresAt`'s own doc comment ("An abandoned offer
+    // returns its budget on expiry") is a hold-visible invariant, not
+    // something that may wait on that orchestration landing. Without this,
+    // an abandoned offer's hold would count against budget forever.
+    // COMMITTED holds have no such carve-out — they're a permanent spend,
+    // not a provisional one, and are never time-limited.
     const outstandingResult = await tx.execute<{ outstanding_minor: string }>(sql`
       SELECT COALESCE(SUM(amount_minor), 0) AS outstanding_minor
       FROM campaign_holds
       WHERE merchant_id = ${merchantId}
-        AND state IN ('RESERVED', 'COMMITTED')
+        AND (
+          state = 'COMMITTED'
+          OR (state = 'RESERVED' AND expires_at > now())
+        )
     `);
 
     const outstandingMinor = Number(outstandingResult.rows[0]?.outstanding_minor ?? 0);
@@ -173,5 +187,179 @@ export async function reserveCampaignBudget(
 
     const row = insertResult.rows[0]!;
     return { reserved: true, hold: toSelectCampaignHold(row) };
+  });
+}
+
+/**
+ * TICKET-108 — the other two transitions out of `RESERVED` (PRD §6.5,
+ * CONTRACTS.md §8). Reservation (`RESERVED`) is TICKET-107's job, built
+ * above; this is release (`-> RELEASED`) and commit (`-> COMMITTED`).
+ *
+ * Reading `packages/policy/contracts/state-machine.ts` resolves an ambiguity
+ * in the ticket text: "released on expiry, decline, or payment failure"
+ * reads as if each cause might need its own reason code, but the frozen
+ * transition table shows every hold release — regardless of which of the
+ * three real-world causes triggered it — is its own self-loop transition
+ * carrying exactly `HOLD_RELEASED` (`EXPIRED --HOLD_RELEASED--> EXPIRED`,
+ * `PAYMENT_FAILED --HOLD_RELEASED--> PAYMENT_FAILED`, and the tier-2 decline
+ * path `OFFER_PENDING --BUYER_DECLINES--> OPEN` also carrying
+ * `HOLD_RELEASED`). Likewise every commit carries exactly `HOLD_COMMITTED`
+ * (`SETTLED --HOLD_COMMITTED--> SETTLED`). The cause-specific codes
+ * (`OFFER_EXPIRED`, `PAYMENT_FAILED`, `PAYMENT_CAPTURED`) belong to the
+ * *session* state machine's own transitions — orchestration that doesn't
+ * exist yet in this codebase and is not this ticket's job. So one generic
+ * release function and one generic commit function suffice: the caller
+ * decides *why* it's releasing or committing: the database doesn't need to
+ * know, and no "reason" parameter is invented here.
+ *
+ * Each is a single, self-contained conditional `UPDATE ... WHERE state =
+ * 'RESERVED'`. Unlike `reserveCampaignBudget`, this needs no row-lock-plus-
+ * separate-statement pattern (ISSUE-004 doesn't apply): there is no
+ * unrelated-table aggregate computed inside the statement, just a
+ * conditional update of the one row being transitioned. Postgres's row-level
+ * MVCC makes this atomic under concurrency on its own — two racing callers
+ * resolving the same hold serialize at the row: the first to commit wins,
+ * and the second's `WHERE state = 'RESERVED'` is re-evaluated against the
+ * now-changed row, matches nothing, and updates zero rows. That is verified
+ * directly by this ticket's concurrency test, not merely asserted.
+ *
+ * Both functions let the caller distinguish "this call actually transitioned
+ * the row" from "it was already resolved, this was a no-op" — a retry or a
+ * race landing on an already-resolved hold is an expected, safe outcome, not
+ * an error. This is not the CONTRACTS.md §6 "silently default at a decision
+ * boundary" case: no real decision is being skipped here. The invariant that
+ * matters — a hold is never double-released or double-committed — is
+ * preserved by construction regardless of how many times a caller retries.
+ */
+
+export type ResolveCampaignHoldResult =
+  | { resolved: true; hold: SelectCampaignHold }
+  | { resolved: false };
+
+async function transitionHoldFromReserved(
+  database: NodePgDatabase,
+  holdId: string,
+  targetState: "RELEASED" | "COMMITTED",
+): Promise<ResolveCampaignHoldResult> {
+  const result = await database.execute<CampaignHoldRow>(sql`
+    UPDATE campaign_holds
+    SET state = ${targetState}, resolved_at = now()
+    WHERE id = ${holdId} AND state = 'RESERVED'
+    RETURNING
+      id,
+      merchant_id,
+      offer_id,
+      amount_minor,
+      state,
+      expires_at,
+      resolved_at,
+      created_at
+  `);
+
+  const row = result.rows[0];
+  if (!row) {
+    return { resolved: false };
+  }
+
+  return { resolved: true, hold: toSelectCampaignHold(row) };
+}
+
+/**
+ * Releases a `RESERVED` hold, restoring its amount to `available`. Used for
+ * all three real-world release causes — buyer decline of a tier-2 offer,
+ * TTL expiry, and payment failure — which all emit the identical
+ * `HOLD_RELEASED` code per the frozen state machine (see module comment
+ * above). The caller is responsible for whatever session-level transition
+ * and audit event accompany the cause; this function only moves the hold.
+ *
+ * A hold not currently `RESERVED` (already released, already committed, or
+ * nonexistent) is a safe no-op: `{ resolved: false }`, never a thrown error.
+ */
+export async function releaseCampaignHold(
+  database: NodePgDatabase,
+  holdId: string,
+): Promise<ResolveCampaignHoldResult> {
+  return transitionHoldFromReserved(database, holdId, "RELEASED");
+}
+
+/**
+ * Commits a `RESERVED` hold on confirmed payment capture. A committed hold
+ * still counts against `available` (`available = total − reserved −
+ * committed`) — committing does not free the budget, it converts a
+ * provisional reservation into a permanent spend. Emits `HOLD_COMMITTED` per
+ * the frozen state machine's `SETTLED --HOLD_COMMITTED--> SETTLED` self-loop.
+ *
+ * A hold not currently `RESERVED` is a safe no-op: `{ resolved: false }`,
+ * never a thrown error. So is a hold that is still `RESERVED` but past its
+ * `expires_at`: `reserveCampaignBudget` already excludes such a hold from
+ * `available`, letting a later reservation reuse its amount, so committing
+ * it here — moving it into the unconditionally-counted `COMMITTED` state —
+ * would double-count that budget slot. Treated the same as "not resolved".
+ *
+ * Unlike `releaseCampaignHold`, this cannot be a single bare statement.
+ * `now()` is fixed once per Postgres transaction, not re-evaluated per
+ * statement, and a lone `UPDATE` here would run in its own one-statement
+ * transaction sharing no lock with a concurrent `reserveCampaignBudget` call.
+ * That leaves a real window right at the expiry boundary: a commit whose own
+ * `now()` was captured a moment *before* `expires_at` can still write
+ * `COMMITTED` after a concurrent reservation — using its own, later `now()`
+ * — already decided the same hold was expired and reused its amount. Both
+ * would then count, over-attributing this merchant's outstanding spend and
+ * wrongly denying later valid reservations (the exact bug the expiry check
+ * above was added to prevent, reopened by the two calls simply racing).
+ *
+ * The fix is to serialize against reservations the same way reservations
+ * serialize against each other (see the `reserveCampaignBudget` module
+ * comment / ISSUE-004): take the same `merchant_policies` row's `FOR UPDATE`
+ * lock first, inside one transaction, before evaluating `expires_at`. Any
+ * concurrent reservation for this merchant then either finishes first (and
+ * this commit's expiry check runs against `now()` captured *after* it, so it
+ * sees the same "expired" verdict the reservation did) or waits for this
+ * transaction to finish first (and its own outstanding read then reflects
+ * this commit's outcome). Either order is safe; only running unsynchronized
+ * is not.
+ */
+export async function commitCampaignHold(
+  database: NodePgDatabase,
+  holdId: string,
+): Promise<ResolveCampaignHoldResult> {
+  return database.transaction(async (tx): Promise<ResolveCampaignHoldResult> => {
+    const holdLookup = await tx.execute<{ merchant_id: string }>(sql`
+      SELECT merchant_id FROM campaign_holds WHERE id = ${holdId}
+    `);
+    const merchantId = holdLookup.rows[0]?.merchant_id;
+    if (!merchantId) {
+      return { resolved: false };
+    }
+
+    // Same synchronization point as reserveCampaignBudget's step 1: blocks
+    // until any in-flight reservation for this merchant commits and
+    // releases the row lock, and blocks any reservation that starts after
+    // this until this transaction finishes.
+    await tx.execute(sql`
+      SELECT 1 FROM merchant_policies WHERE merchant_id = ${merchantId} FOR UPDATE
+    `);
+
+    const result = await tx.execute<CampaignHoldRow>(sql`
+      UPDATE campaign_holds
+      SET state = 'COMMITTED', resolved_at = now()
+      WHERE id = ${holdId} AND state = 'RESERVED' AND expires_at > clock_timestamp()
+      RETURNING
+        id,
+        merchant_id,
+        offer_id,
+        amount_minor,
+        state,
+        expires_at,
+        resolved_at,
+        created_at
+    `);
+
+    const row = result.rows[0];
+    if (!row) {
+      return { resolved: false };
+    }
+
+    return { resolved: true, hold: toSelectCampaignHold(row) };
   });
 }

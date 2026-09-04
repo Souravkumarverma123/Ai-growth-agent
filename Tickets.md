@@ -370,7 +370,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-108 — Campaign hold lifecycle
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-107
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-107
 
 **Objective.** Reserve / release / commit, with a TTL matching the offer.
 
