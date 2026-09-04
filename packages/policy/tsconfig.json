@@ -1,4 +1,4 @@
 {
   "extends": ["@repo/typescript-config/node.json"],
-  "include": ["contracts/", "index.ts"]
+  "include": ["contracts/", "economics/", "index.ts"]
 }

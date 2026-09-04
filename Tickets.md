@@ -225,7 +225,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-102 — Basket contribution calculator
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 0
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 0
 
 **Objective.** Compute contribution for any basket, at basket level.
 
