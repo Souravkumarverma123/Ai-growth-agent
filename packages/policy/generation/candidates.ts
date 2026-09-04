@@ -181,14 +181,33 @@ function requireSkuPolicy(bySkuId: Map<string, SkuPolicy>, skuId: string): SkuPo
 }
 
 /**
- * Domain invariant not enforced by the zod schema (both `listPriceMinor` and
- * `floorPriceMinor` are independently just non-negative integers): a floor
- * above list would make every headroom calculation in this module negative
- * and nonsensical. Fails closed rather than silently producing a candidate
- * priced above list "to stay above floor".
+ * Domain invariants not enforced by the zod schema, all fatal to this
+ * module's reasoning if violated:
+ *
+ *  - a floor above list (both are independently just non-negative integers)
+ *    would make every headroom calculation here negative and nonsensical —
+ *    fails closed rather than silently producing a candidate priced above
+ *    list "to stay above floor";
+ *  - a duplicate `skuId` would make `indexSkuPoliciesById`'s last-write-wins
+ *    `Map` silently disagree with the raw-array scans in
+ *    {@link findAffinityAddCandidates} and {@link findSlowMovingAddCandidates}
+ *    — one candidate build could price/floor-check off one record while
+ *    everything routed through the map uses another;
+ *  - a SKU from another merchant would let generation offer, price, and
+ *    floor-check a basket line this policy has no authority over.
  */
-function assertSkuCatalogueIsSane(skuCatalogue: readonly SkuPolicy[]): void {
+function assertSkuCatalogueIsSane(skuCatalogue: readonly SkuPolicy[], merchantId: string): void {
+  const seenSkuIds = new Set<string>();
   for (const sku of skuCatalogue) {
+    if (sku.merchantId !== merchantId) {
+      throw new Error(
+        `generateCandidates: skuId "${sku.skuId}" belongs to merchantId "${sku.merchantId}", not policy merchantId "${merchantId}"`,
+      );
+    }
+    if (seenSkuIds.has(sku.skuId)) {
+      throw new Error(`generateCandidates: skuCatalogue contains duplicate skuId "${sku.skuId}"`);
+    }
+    seenSkuIds.add(sku.skuId);
     if (sku.floorPriceMinor > sku.listPriceMinor) {
       throw new Error(
         `generateCandidates: skuId "${sku.skuId}" has floorPriceMinor (${sku.floorPriceMinor}) above listPriceMinor (${sku.listPriceMinor})`,
@@ -240,23 +259,26 @@ function basketTotalMinor(basket: Basket): MinorUnits {
  * quantity increase applied to an already slow-moving line alike, with one
  * rule instead of one per move type.
  */
+function totalQuantityBySkuId(basket: Basket): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const line of basket.lines) {
+    totals.set(line.skuId, (totals.get(line.skuId) ?? 0) + line.quantity);
+  }
+  return totals;
+}
+
 function introducesSlowMovingInventory(
   candidateBasket: Basket,
   originalBasket: Basket,
   skuPoliciesById: Map<string, SkuPolicy>,
 ): boolean {
-  const originalQuantityBySkuId = new Map<string, number>();
-  for (const line of originalBasket.lines) {
-    originalQuantityBySkuId.set(
-      line.skuId,
-      (originalQuantityBySkuId.get(line.skuId) ?? 0) + line.quantity,
-    );
-  }
-  for (const line of candidateBasket.lines) {
-    const skuPolicy = requireSkuPolicy(skuPoliciesById, line.skuId);
+  const originalQuantityBySkuId = totalQuantityBySkuId(originalBasket);
+  const candidateQuantityBySkuId = totalQuantityBySkuId(candidateBasket);
+  for (const [skuId, candidateQuantity] of candidateQuantityBySkuId) {
+    const skuPolicy = requireSkuPolicy(skuPoliciesById, skuId);
     if (!skuPolicy.slowMoving) continue;
-    const originalQuantity = originalQuantityBySkuId.get(line.skuId) ?? 0;
-    if (line.quantity > originalQuantity) {
+    const originalQuantity = originalQuantityBySkuId.get(skuId) ?? 0;
+    if (candidateQuantity > originalQuantity) {
       return true;
     }
   }
@@ -428,16 +450,21 @@ function findHighestContributionLine(
 
 /** Increases the target line's quantity by `additionalQuantity`, at its
  *  existing unit price — a quantity change never touches a unit price, so
- *  it cannot introduce a sub-floor line. */
+ *  it cannot introduce a sub-floor line.
+ *
+ *  Matches `targetLine` by identity, not by `skuId`: the basket schema
+ *  doesn't forbid two lines sharing a `skuId` (e.g. added at different
+ *  prices), and matching by `skuId` would bump every such line instead of
+ *  just the one selected. */
 function buildIncreaseQuantityCandidateBasket(
   originalBasket: Basket,
-  targetSkuId: string,
+  targetLine: BasketLine,
   additionalQuantity: number,
 ): Basket {
   return {
     ...originalBasket,
     lines: originalBasket.lines.map((line) =>
-      line.skuId === targetSkuId ? { ...line, quantity: line.quantity + additionalQuantity } : { ...line },
+      line === targetLine ? { ...line, quantity: line.quantity + additionalQuantity } : { ...line },
     ),
   };
 }
@@ -491,8 +518,8 @@ export function generateCandidates(input: CandidateGenerationInput): CandidateGe
   const { session, policy, skuCatalogue } = input;
   const { originalBasket, counterfactualContributionMinor, roundIndex } = session;
 
+  assertSkuCatalogueIsSane(skuCatalogue, policy.merchantId);
   const skuPoliciesById = indexSkuPoliciesById(skuCatalogue);
-  assertSkuCatalogueIsSane(skuCatalogue);
   assertOriginalBasketRespectsFloors(originalBasket, skuPoliciesById);
 
   const candidates: GeneratedCandidate[] = [];
@@ -557,7 +584,7 @@ export function generateCandidates(input: CandidateGenerationInput): CandidateGe
   for (let additionalQuantity = 1; additionalQuantity <= INCREASE_QUANTITY_SLOTS; additionalQuantity += 1) {
     pushCandidate(
       "INCREASE_QUANTITY",
-      buildIncreaseQuantityCandidateBasket(originalBasket, topLine.skuId, additionalQuantity),
+      buildIncreaseQuantityCandidateBasket(originalBasket, topLine, additionalQuantity),
     );
   }
 
