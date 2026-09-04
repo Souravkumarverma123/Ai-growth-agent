@@ -156,6 +156,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 - The data layer exposes append and read only; no update or delete function exists.
 - A comment records the self-anchored chain limitation from PRD §13.3.
 - `model_explanation` is documented as holding a short final rationale only — never chain-of-thought (RA-5).
+- **Exceeded, 2026-09-04:** append-only is now also enforced at the database level — migration `0002_audit_events_append_only.sql` installs `BEFORE UPDATE`/`BEFORE DELETE` triggers on `audit_events` that reject any such statement regardless of caller privilege. Closes the gap where any role with ordinary table privilege could have altered or removed evidence; does not touch the disclosed self-anchored-chain limitation, which remains accepted. Verified live: an UPDATE against the trigger raises `audit_events is append-only: UPDATE is not permitted on this table`.
 
 **Tests required.** An event without a reason code fails to insert. No update/delete export exists.
 
