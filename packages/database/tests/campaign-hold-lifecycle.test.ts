@@ -333,6 +333,59 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
     },
   );
 
+  it(
+    "committing an expired hold races a concurrent reservation reusing its slot: the two never both count the same budget, whichever order the row lock resolves in",
+    async () => {
+      const CAMPAIGN_BUDGET_TOTAL_MINOR = 100_000;
+      const PER_DEAL_CAP_MINOR = 100_000;
+      const AMOUNT_MINOR = 70_000;
+
+      const merchantId = await insertMerchantWithPolicy({
+        campaignBudgetTotalMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
+        perDealCapMinor: PER_DEAL_CAP_MINOR,
+      });
+
+      const db = await getTestDb();
+
+      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
+      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      await db
+        .update(campaignHoldsTable)
+        .set({ expiresAt: new Date(Date.now() - 1_000) })
+        .where(eq(campaignHoldsTable.id, holdId));
+
+      // Fire the late commit and the budget-reusing reservation at the same
+      // time. Without commitCampaignHold locking the same merchant_policies
+      // row reserveCampaignBudget locks, these run as two fully
+      // unsynchronized transactions and can both succeed — the exact race
+      // this test guards against.
+      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const [commitResult, reserveResult] = await Promise.all([
+        commitCampaignHold(db, holdId),
+        reserveCampaignBudget(db, {
+          merchantId,
+          offerId: offerId2,
+          amountMinor: AMOUNT_MINOR,
+          expiresAt: new Date(Date.now() + 600_000),
+        }),
+      ]);
+
+      // The already-expired hold must never win the commit, regardless of
+      // which transaction acquired the merchant_policies lock first.
+      expect(commitResult.resolved).toBe(false);
+      // The reservation has genuine expired budget to reclaim either way,
+      // so it must succeed.
+      expect(reserveResult.reserved).toBe(true);
+
+      const [hold] = await db
+        .select()
+        .from(campaignHoldsTable)
+        .where(eq(campaignHoldsTable.id, holdId));
+      expect(hold!.state).toBe("RESERVED");
+    },
+    30_000,
+  );
+
   describe("never double-released or double-committed", () => {
     it(
       "two concurrent release attempts on the same hold: exactly one wins, the other is a safe no-op",

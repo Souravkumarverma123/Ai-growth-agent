@@ -241,23 +241,10 @@ async function transitionHoldFromReserved(
   holdId: string,
   targetState: "RELEASED" | "COMMITTED",
 ): Promise<ResolveCampaignHoldResult> {
-  // Committing only ever applies to a hold still within its expires_at.
-  // reserveCampaignBudget's outstanding-sum already excludes a RESERVED hold
-  // once it's past expiry (treating its amount as returned to `available`
-  // for later reservations to claim); without this same cutoff here, a late
-  // commit on that same still-RESERVED-but-expired row would move it into
-  // COMMITTED, which is counted unconditionally — double-counting that
-  // budget slot against both this hold and whatever later reservation
-  // already reused it. Release has no such cutoff: it only ever removes a
-  // hold from the outstanding sum, so releasing an expired hold late is
-  // always safe.
-  const expiryCondition =
-    targetState === "COMMITTED" ? sql`AND expires_at > now()` : sql``;
-
   const result = await database.execute<CampaignHoldRow>(sql`
     UPDATE campaign_holds
     SET state = ${targetState}, resolved_at = now()
-    WHERE id = ${holdId} AND state = 'RESERVED' ${expiryCondition}
+    WHERE id = ${holdId} AND state = 'RESERVED'
     RETURNING
       id,
       merchant_id,
@@ -308,10 +295,71 @@ export async function releaseCampaignHold(
  * `available`, letting a later reservation reuse its amount, so committing
  * it here — moving it into the unconditionally-counted `COMMITTED` state —
  * would double-count that budget slot. Treated the same as "not resolved".
+ *
+ * Unlike `releaseCampaignHold`, this cannot be a single bare statement.
+ * `now()` is fixed once per Postgres transaction, not re-evaluated per
+ * statement, and a lone `UPDATE` here would run in its own one-statement
+ * transaction sharing no lock with a concurrent `reserveCampaignBudget` call.
+ * That leaves a real window right at the expiry boundary: a commit whose own
+ * `now()` was captured a moment *before* `expires_at` can still write
+ * `COMMITTED` after a concurrent reservation — using its own, later `now()`
+ * — already decided the same hold was expired and reused its amount. Both
+ * would then count, over-attributing this merchant's outstanding spend and
+ * wrongly denying later valid reservations (the exact bug the expiry check
+ * above was added to prevent, reopened by the two calls simply racing).
+ *
+ * The fix is to serialize against reservations the same way reservations
+ * serialize against each other (see the `reserveCampaignBudget` module
+ * comment / ISSUE-004): take the same `merchant_policies` row's `FOR UPDATE`
+ * lock first, inside one transaction, before evaluating `expires_at`. Any
+ * concurrent reservation for this merchant then either finishes first (and
+ * this commit's expiry check runs against `now()` captured *after* it, so it
+ * sees the same "expired" verdict the reservation did) or waits for this
+ * transaction to finish first (and its own outstanding read then reflects
+ * this commit's outcome). Either order is safe; only running unsynchronized
+ * is not.
  */
 export async function commitCampaignHold(
   database: NodePgDatabase,
   holdId: string,
 ): Promise<ResolveCampaignHoldResult> {
-  return transitionHoldFromReserved(database, holdId, "COMMITTED");
+  return database.transaction(async (tx): Promise<ResolveCampaignHoldResult> => {
+    const holdLookup = await tx.execute<{ merchant_id: string }>(sql`
+      SELECT merchant_id FROM campaign_holds WHERE id = ${holdId}
+    `);
+    const merchantId = holdLookup.rows[0]?.merchant_id;
+    if (!merchantId) {
+      return { resolved: false };
+    }
+
+    // Same synchronization point as reserveCampaignBudget's step 1: blocks
+    // until any in-flight reservation for this merchant commits and
+    // releases the row lock, and blocks any reservation that starts after
+    // this until this transaction finishes.
+    await tx.execute(sql`
+      SELECT 1 FROM merchant_policies WHERE merchant_id = ${merchantId} FOR UPDATE
+    `);
+
+    const result = await tx.execute<CampaignHoldRow>(sql`
+      UPDATE campaign_holds
+      SET state = 'COMMITTED', resolved_at = now()
+      WHERE id = ${holdId} AND state = 'RESERVED' AND expires_at > now()
+      RETURNING
+        id,
+        merchant_id,
+        offer_id,
+        amount_minor,
+        state,
+        expires_at,
+        resolved_at,
+        created_at
+    `);
+
+    const row = result.rows[0];
+    if (!row) {
+      return { resolved: false };
+    }
+
+    return { resolved: true, hold: toSelectCampaignHold(row) };
+  });
 }
