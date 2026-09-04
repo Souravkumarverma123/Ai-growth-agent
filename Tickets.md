@@ -64,6 +64,8 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 **Affected.** Root config, `turbo.json`, each package's `package.json`.
 
+**Gap noted 2026-09-04 (ISSUE-003):** the test-database strategy and DB-harness smoke test described above were never actually built — no second Postgres database exists and no smoke test exists anywhere in the repo. `packages/policy` and `packages/trpc` are the only packages with tests, and neither touches a database. TICKET-507 works around this by seeding and verifying directly against the real `dev` database. A proper shared real-Postgres test harness is still needed before TICKET-107's concurrency test.
+
 **Parallelization.** None — first ticket.
 
 **References.** PRD §21; Settled by: Q26
