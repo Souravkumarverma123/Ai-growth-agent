@@ -4,6 +4,9 @@
   "globalEnv": [
     "SKIP_ENV_VALIDATION"
   ],
+  "globalPassThroughEnv": [
+    "DATABASE_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": [
