@@ -3,6 +3,8 @@ import "dotenv/config";
 import type { Basket, CommitmentType } from "@repo/policy/contracts";
 import { CURRENCY } from "@repo/policy/contracts";
 
+import { and, eq, notInArray } from "drizzle-orm";
+
 import { db } from "./index";
 import {
   commitmentValuesTable,
@@ -29,6 +31,11 @@ import {
  * errors and never duplicates a row. It never reads or writes a table, or a
  * merchant id, it doesn't own — a pre-existing unrelated row (e.g. a
  * manually-inserted probe merchant) is left untouched.
+ *
+ * SKUs no longer present in SEED_CATALOGUE (removed, or renamed to a new
+ * sku) are deleted after the upsert loop, so the seed merchant's sku_policies
+ * rows always match this file exactly rather than accumulating stale entries
+ * across revisions.
  */
 
 // ---------------------------------------------------------------------------
@@ -378,6 +385,19 @@ export async function seedDatabase(database: typeof db = db): Promise<void> {
           set: fields,
         });
     }
+
+    // Drop any sku_policies row this script previously seeded for a SKU that
+    // no longer appears in SEED_CATALOGUE (removed, or renamed), so re-runs
+    // converge on exactly the current catalogue instead of leaving stale rows.
+    await tx.delete(skuPoliciesTable).where(
+      and(
+        eq(skuPoliciesTable.merchantId, SEED_MERCHANT_ID),
+        notInArray(
+          skuPoliciesTable.sku,
+          SEED_CATALOGUE.map((item) => item.sku),
+        ),
+      ),
+    );
   });
 }
 
