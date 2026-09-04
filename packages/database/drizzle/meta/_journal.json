@@ -15,6 +15,13 @@
       "when": 1788528910177,
       "tag": "0001_sour_dreadnoughts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788532876309,
+      "tag": "0002_audit_events_append_only",
+      "breakpoints": true
     }
   ]
 }
