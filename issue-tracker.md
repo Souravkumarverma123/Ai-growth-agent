@@ -69,7 +69,49 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-*None.*
+## ISSUE-003 — TICKET-001's database test harness was never built, despite being marked DONE
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-507 (pre-check, before starting)
+Date: 2026-09-04
+Violates invariant: none
+
+### Problem
+
+TICKET-001 ("Test infrastructure") is marked DONE and folded into the Phase 0 "✅ COMPLETE" banner. Its scope included "a test database strategy (separate Postgres database via the existing docker-compose, truncated between suites)" and its acceptance criteria required a test that "can open a transaction against a real test database and roll it back," with "one smoke test proving the DB harness connects." None of this exists: `docker-compose.yml` defines exactly one Postgres service (`postgresdb`, database `dev`); there is no second/test database; there is no root-level shared DB-test helper; and no smoke test exists anywhere in the repo.
+
+### Expected
+
+A ticket marked DONE should have its acceptance criteria actually met, and any later ticket needing "a real Postgres" (CONTRACTS.md §8 seam 1) should find an established, shared pattern to build on.
+
+### Actual
+
+`packages/database/package.json` has no `test` script and no `vitest.config.ts`. The only two test files in the repo (`packages/policy/tests/contracts.test.ts`, `packages/trpc/tests/router-boot.test.ts`) never touch a database.
+
+### Root Cause
+
+TICKET-001 was marked DONE during the Phase 0 push without its DB-harness acceptance criterion actually being verified — likely conflated with the schema/migration work in TICKET-003/004, which touches the database but doesn't test connectivity or provide a reusable harness.
+
+### Impact
+
+No product invariant is broken. But every ticket that needs seam 1 — TICKET-107 (real-concurrency budget test), TICKET-111, TICKET-302, TICKET-507, and others — is building on a foundation that was claimed but not delivered, and risks each one inventing its own ad hoc approach.
+
+### Fix
+
+Not yet fixed. Interim, scoped workaround given to TICKET-507 (which needs a DB test now and would otherwise be blocked): seed and verify directly against the real `dev` database via the existing `DATABASE_URL` — no separate test database needed for that one ticket, since seeding `dev` is the ticket's actual deliverable. The general fix — a shared, reusable real-Postgres test harness — is still needed before TICKET-107, which hard-requires real concurrency against a real database.
+
+### Regression Test
+
+None yet — the eventual fix's own regression test is the smoke test TICKET-001 originally specified.
+
+### Related Ticket
+
+TICKET-001 (unmet), TICKET-507 (worked around), TICKET-107 (will hit this next)
+
+### Status History
+
+- 2026-09-04: OPEN
 
 ---
 
