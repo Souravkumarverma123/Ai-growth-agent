@@ -1,0 +1,15 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "lint": {
+      "passThroughEnv": ["VERCEL_URL", "PORT"]
+    },
+    "build": {
+      "passThroughEnv": ["VERCEL_URL", "PORT"]
+    },
+    "check-types": {
+      "passThroughEnv": ["VERCEL_URL", "PORT"]
+    }
+  }
+}
