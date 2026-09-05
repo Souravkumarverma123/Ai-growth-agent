@@ -227,8 +227,21 @@ export class FloorBreachError extends Error {
  * this runs at mint time, downstream of TICKET-104's tiering, on the object
  * that is about to become an `Offer` — the last point before a sub-floor
  * price could reach money.
+ *
+ * As the last line of defense, this cannot trust `skuCatalogue`'s integrity
+ * any more than `candidates.ts` does: `findFloorBreaches` resolves each line
+ * through a last-write-wins `Map`, so a duplicate or cross-merchant entry
+ * could silently substitute a lower floor and let a genuinely sub-floor
+ * candidate pass. `assertSkuCatalogueIsSane` (the same check generation-time
+ * already runs) closes that gap here too, so the caller's `merchantId` is
+ * required, not optional.
  */
-export function assertNoFloorBreach(candidate: Candidate, skuCatalogue: readonly SkuPolicy[]): void {
+export function assertNoFloorBreach(
+  candidate: Candidate,
+  skuCatalogue: readonly SkuPolicy[],
+  merchantId: string,
+): void {
+  assertSkuCatalogueIsSane(skuCatalogue, merchantId);
   const breaches = findFloorBreaches(candidate.basket, skuCatalogue);
   if (breaches.length > 0) {
     throw new FloorBreachError(candidate.candidateId, breaches);

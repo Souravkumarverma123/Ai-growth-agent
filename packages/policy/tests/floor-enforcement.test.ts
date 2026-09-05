@@ -101,7 +101,7 @@ describe("findFloorBreaches", () => {
 describe("assertNoFloorBreach — the defensive mint-time assertion (PRD §14 FLOOR_BREACH, §17 row 9)", () => {
   it("does not throw for a candidate whose every line is at or above its floor", () => {
     const clean = buildCandidate({ basket: basket(110000) });
-    expect(() => assertNoFloorBreach(clean, skuCatalogue)).not.toThrow();
+    expect(() => assertNoFloorBreach(clean, skuCatalogue, MERCHANT_ID)).not.toThrow();
   });
 
   it("halts on a deliberately corrupted candidate priced below floor, throwing a distinctive FloorBreachError tagged FLOOR_BREACH", () => {
@@ -109,7 +109,7 @@ describe("assertNoFloorBreach — the defensive mint-time assertion (PRD §14 FL
 
     let thrown: unknown;
     try {
-      assertNoFloorBreach(corrupted, skuCatalogue);
+      assertNoFloorBreach(corrupted, skuCatalogue, MERCHANT_ID);
     } catch (error) {
       thrown = error;
     }
@@ -125,7 +125,20 @@ describe("assertNoFloorBreach — the defensive mint-time assertion (PRD §14 FL
 
   it("halts rather than continues — the assertion throws, it never returns a silently-ignorable value", () => {
     const corrupted = buildCandidate({ basket: basket(1) });
-    expect(() => assertNoFloorBreach(corrupted, skuCatalogue)).toThrow(FloorBreachError);
+    expect(() => assertNoFloorBreach(corrupted, skuCatalogue, MERCHANT_ID)).toThrow(FloorBreachError);
+  });
+
+  it("does not trust the catalogue: halts on a duplicate skuId even when the winning last-write entry alone would look clean", () => {
+    const clean = buildCandidate({ basket: basket(150000) }); // above floor per the legitimate entry
+    const lowerFloorDuplicate: SkuPolicy = { ...skuCatalogue[0]!, floorPriceMinor: 200000 };
+    const catalogueWithDuplicate = [skuCatalogue[0]!, lowerFloorDuplicate];
+
+    expect(() => assertNoFloorBreach(clean, catalogueWithDuplicate, MERCHANT_ID)).toThrow(/duplicate/i);
+  });
+
+  it("does not trust the catalogue: halts when a supplied SKU belongs to a different merchant", () => {
+    const clean = buildCandidate({ basket: basket(150000) });
+    expect(() => assertNoFloorBreach(clean, skuCatalogue, "not-this-merchant")).toThrow(/merchantId/i);
   });
 
   it("reports every sub-floor line, not just the first, when a multi-line candidate is corrupted on more than one line", () => {
@@ -155,9 +168,9 @@ describe("assertNoFloorBreach — the defensive mint-time assertion (PRD §14 FL
       },
     });
 
-    expect(() => assertNoFloorBreach(corrupted, twoSkuCatalogue)).toThrow(FloorBreachError);
+    expect(() => assertNoFloorBreach(corrupted, twoSkuCatalogue, MERCHANT_ID)).toThrow(FloorBreachError);
     try {
-      assertNoFloorBreach(corrupted, twoSkuCatalogue);
+      assertNoFloorBreach(corrupted, twoSkuCatalogue, MERCHANT_ID);
       throw new Error("expected assertNoFloorBreach to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(FloorBreachError);
