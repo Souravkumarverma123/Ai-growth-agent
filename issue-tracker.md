@@ -69,6 +69,77 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-005 — TICKET-403's ledger-writer functions can't know *why* a hold is being released/reserved/committed
+
+Status: FIXED
+Severity: LOW
+Found in: TICKET-403
+Date: 2026-09-05
+Violates invariant: none — a design-completeness gap, not a broken invariant.
+
+### Problem
+
+TICKET-403 asks `reserveCampaignBudget` / `releaseCampaignHold` /
+`commitCampaignHold` (`packages/database/repositories/campaign-holds.ts`,
+built by TICKET-107/108) to each append exactly one ledger event
+(`HOLD_RESERVED` / `HOLD_RELEASED` / `HOLD_COMMITTED`) via `appendAuditEvent`
+(TICKET-401) in the same transaction as the hold's own state change. But the
+exact `eventType` / `fromState` / `toState` for a given call is not derivable
+from the hold row alone: `releaseCampaignHold` is called for three different
+real-world causes (buyer decline of a tier-2 offer, TTL expiry, payment
+failure), each a *different* transition in the frozen state machine
+(`packages/policy/contracts/state-machine.ts`) — `OFFER_PENDING
+--BUYER_DECLINES--> OPEN`, `EXPIRED --HOLD_RELEASED--> EXPIRED`, and
+`PAYMENT_FAILED --HOLD_RELEASED--> PAYMENT_FAILED` respectively — even though
+all three carry the identical `HOLD_RELEASED` reason code. No
+session-orchestration layer exists yet in this codebase to resolve "why" a
+release is happening, so the repository function itself has no way to pick
+the right transition on its own.
+
+### Expected / Actual
+
+Not a behavioural bug — no test failed. This is a design-completeness gap
+the ticket text itself flagged as "a real ambiguity" and explicitly invited a
+reasoned engineering call on, rather than a defect discovered after the
+fact.
+
+### Fix
+
+Extended the parameter lists of all three functions with a caller-supplied
+`ledger: CampaignHoldLedgerContext` (`sessionId`, `eventType`, `fromState`,
+`toState`, `reasonCode`, plus optional `payload` / `policyVersion` /
+`modelExplanation`) — mirroring how `appendAuditEvent` itself already takes
+these as plain params rather than deriving them. The repository stays dumb
+about *why* a transition is happening; the caller (today, each test's own
+fixture code; eventually the session-orchestration layer no ticket has built
+yet) supplies the exact transition. `campaignHoldId`, `campaignSpendMinor`
+and `offerId` are deliberately NOT part of the caller-supplied context —
+those always come from the hold row the call resolves, so the ledger amount
+can never diverge from the hold's real `amount_minor`.
+
+### Regression Test
+
+`packages/database/tests/campaign-hold-ledger.test.ts` — asserts every
+appended event carries the caller-supplied `eventType`/`fromState`/`toState`/
+`reasonCode` correctly, that `campaignHoldId`/`campaignSpendMinor`/`offerId`
+are always derived from the hold row, and that a full reserve→commit and
+reserve→release lifecycle's ledger events net to the same outstanding budget
+as `campaign_holds` itself.
+
+### Related Ticket
+
+TICKET-403 (found and resolved here)
+
+### Status History
+
+- 2026-09-05: OPEN — flagged by the ticket text itself as a genuine ambiguity
+  requiring an engineering call, not a blocking spec gap.
+- 2026-09-05: FIXED — `CampaignHoldLedgerContext` parameter added to all
+  three hold functions; caller supplies the transition, repository stays
+  pure I/O.
+
+---
+
 ## ISSUE-004 — The "recommended" single-CTE-statement campaign-budget reservation over-admits under real concurrency
 
 Status: FIXED

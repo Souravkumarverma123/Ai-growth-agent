@@ -1,7 +1,10 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
+import type { NegotiationEvent, NegotiationState, ReasonCode } from "@repo/policy/contracts";
+
 import type { SelectCampaignHold } from "../models/offer";
+import { appendAuditEvent } from "./audit-events";
 
 /**
  * TICKET-107 — atomic campaign-budget reservation (PRD §6.5, CONTRACTS.md §8).
@@ -52,13 +55,83 @@ import type { SelectCampaignHold } from "../models/offer";
  * Deliberately generic over the drizzle client (`NodePgDatabase`, not the
  * real exported `db`) so this can run against `getTestDb()` in tests and the
  * real `db` in production without a code fork.
+ *
+ * TICKET-403 — every transition below now pairs its `campaign_holds` write
+ * with exactly one ledger append (`appendAuditEvent`,
+ * `packages/database/repositories/audit-events.ts`, TICKET-401), inside the
+ * SAME transaction, so a hold state change and its ledger entry always commit
+ * or roll back together (PRD §6.5, §13.1).
+ *
+ * Ambiguity worth recording (see issue-tracker.md and this ticket's PR
+ * description): which exact `eventType` / `fromState` / `toState` /
+ * `reasonCode` applies to a given call depends on WHY it's happening (a
+ * reservation firing mid-`OFFER_PENDING`, a release from a buyer decline vs.
+ * TTL expiry vs. payment failure, a commit on payment capture) — something
+ * only the caller knows, since no session-orchestration layer exists yet to
+ * resolve it automatically. The fix taken here mirrors how `appendAuditEvent`
+ * itself already takes these as plain params rather than deriving them: each
+ * function below now also takes a `ledger: CampaignHoldLedgerContext` — the
+ * caller supplies the exact transition/reason for the ledger entry, and this
+ * module stays dumb about the session state machine. `sessionId`,
+ * `campaignHoldId` and `campaignSpendMinor` are always taken from the hold row
+ * itself (never from the caller) so the amount in the ledger can never drift
+ * from the amount actually moved.
  */
+
+/**
+ * What the caller supplies so this module can append the correct ledger event
+ * alongside a hold's state change, without this module having to know *why*
+ * the transition is happening (TICKET-403 — see module comment above).
+ * `campaignHoldId`, `campaignSpendMinor` and `offerId` are deliberately NOT
+ * part of this type: they always come from the hold row this call resolves,
+ * never from the caller, so the ledger amount can never diverge from the
+ * hold's actual `amount_minor`.
+ */
+export type CampaignHoldLedgerContext = {
+  /** The negotiation session this hold's ledger event belongs to. */
+  sessionId: string;
+  eventType: NegotiationEvent;
+  fromState: NegotiationState | null;
+  toState: NegotiationState;
+  reasonCode: ReasonCode;
+  /** Extra evidence beyond hold id/amount (which this module always adds). */
+  payload?: Record<string, unknown>;
+  policyVersion?: number | null;
+  /** THE EXPLANATION, non-authoritative — see `appendAuditEvent`'s own doc. */
+  modelExplanation?: string | null;
+};
+
+async function appendHoldLedgerEvent(
+  tx: NodePgDatabase,
+  ledger: CampaignHoldLedgerContext,
+  hold: CampaignHoldRow,
+): Promise<void> {
+  await appendAuditEvent(tx, {
+    sessionId: ledger.sessionId,
+    eventType: ledger.eventType,
+    fromState: ledger.fromState,
+    toState: ledger.toState,
+    reasonCode: ledger.reasonCode,
+    payload: {
+      ...ledger.payload,
+      holdId: hold.id,
+      amountMinor: hold.amount_minor,
+    },
+    policyVersion: ledger.policyVersion ?? null,
+    offerId: hold.offer_id,
+    campaignHoldId: hold.id,
+    campaignSpendMinor: hold.amount_minor,
+    modelExplanation: ledger.modelExplanation ?? null,
+  });
+}
 
 export type ReserveCampaignBudgetParams = {
   merchantId: string;
   offerId: string;
   amountMinor: number;
   expiresAt: Date;
+  /** TICKET-403 — the ledger entry to append alongside this reservation. */
+  ledger: CampaignHoldLedgerContext;
 };
 
 export type ReserveCampaignBudgetResult =
@@ -186,6 +259,11 @@ export async function reserveCampaignBudget(
     `);
 
     const row = insertResult.rows[0]!;
+
+    // TICKET-403 — same tx as the insert above: the hold write and its
+    // ledger entry commit or roll back together.
+    await appendHoldLedgerEvent(tx, params.ledger, row);
+
     return { reserved: true, hold: toSelectCampaignHold(row) };
   });
 }
@@ -212,16 +290,23 @@ export async function reserveCampaignBudget(
  * decides *why* it's releasing or committing: the database doesn't need to
  * know, and no "reason" parameter is invented here.
  *
- * Each is a single, self-contained conditional `UPDATE ... WHERE state =
- * 'RESERVED'`. Unlike `reserveCampaignBudget`, this needs no row-lock-plus-
- * separate-statement pattern (ISSUE-004 doesn't apply): there is no
- * unrelated-table aggregate computed inside the statement, just a
- * conditional update of the one row being transitioned. Postgres's row-level
- * MVCC makes this atomic under concurrency on its own — two racing callers
- * resolving the same hold serialize at the row: the first to commit wins,
- * and the second's `WHERE state = 'RESERVED'` is re-evaluated against the
- * now-changed row, matches nothing, and updates zero rows. That is verified
- * directly by this ticket's concurrency test, not merely asserted.
+ * Each is, on its own, a single self-contained conditional `UPDATE ... WHERE
+ * state = 'RESERVED'`. Unlike `reserveCampaignBudget`, resolving the row needs
+ * no row-lock-plus-separate-statement pattern (ISSUE-004 doesn't apply):
+ * there is no unrelated-table aggregate computed inside that statement, just
+ * a conditional update of the one row being transitioned. Postgres's
+ * row-level MVCC makes that update atomic under concurrency on its own — two
+ * racing callers resolving the same hold serialize at the row: the first to
+ * commit wins, and the second's `WHERE state = 'RESERVED'` is re-evaluated
+ * against the now-changed row, matches nothing, and updates zero rows. That
+ * is verified directly by this ticket's concurrency test, not merely
+ * asserted.
+ *
+ * TICKET-403 wraps that update in a transaction now (where before it was a
+ * single bare statement) purely so it can share that transaction with the
+ * ledger append that must commit or roll back atomically alongside it — the
+ * concurrency argument above is about the `UPDATE` itself and is unaffected
+ * by also running inside a transaction.
  *
  * Both functions let the caller distinguish "this call actually transitioned
  * the row" from "it was already resolved, this was a no-op" — a retry or a
@@ -230,6 +315,8 @@ export async function reserveCampaignBudget(
  * boundary" case: no real decision is being skipped here. The invariant that
  * matters — a hold is never double-released or double-committed — is
  * preserved by construction regardless of how many times a caller retries.
+ * On that no-op path, no ledger event is appended either — there was no
+ * transition to record.
  */
 
 export type ResolveCampaignHoldResult =
@@ -240,28 +327,35 @@ async function transitionHoldFromReserved(
   database: NodePgDatabase,
   holdId: string,
   targetState: "RELEASED" | "COMMITTED",
+  ledger: CampaignHoldLedgerContext,
 ): Promise<ResolveCampaignHoldResult> {
-  const result = await database.execute<CampaignHoldRow>(sql`
-    UPDATE campaign_holds
-    SET state = ${targetState}, resolved_at = now()
-    WHERE id = ${holdId} AND state = 'RESERVED'
-    RETURNING
-      id,
-      merchant_id,
-      offer_id,
-      amount_minor,
-      state,
-      expires_at,
-      resolved_at,
-      created_at
-  `);
+  return database.transaction(async (tx): Promise<ResolveCampaignHoldResult> => {
+    const result = await tx.execute<CampaignHoldRow>(sql`
+      UPDATE campaign_holds
+      SET state = ${targetState}, resolved_at = now()
+      WHERE id = ${holdId} AND state = 'RESERVED'
+      RETURNING
+        id,
+        merchant_id,
+        offer_id,
+        amount_minor,
+        state,
+        expires_at,
+        resolved_at,
+        created_at
+    `);
 
-  const row = result.rows[0];
-  if (!row) {
-    return { resolved: false };
-  }
+    const row = result.rows[0];
+    if (!row) {
+      return { resolved: false };
+    }
 
-  return { resolved: true, hold: toSelectCampaignHold(row) };
+    // TICKET-403 — same tx as the update above: the hold write and its
+    // ledger entry commit or roll back together.
+    await appendHoldLedgerEvent(tx, ledger, row);
+
+    return { resolved: true, hold: toSelectCampaignHold(row) };
+  });
 }
 
 /**
@@ -269,17 +363,23 @@ async function transitionHoldFromReserved(
  * all three real-world release causes — buyer decline of a tier-2 offer,
  * TTL expiry, and payment failure — which all emit the identical
  * `HOLD_RELEASED` code per the frozen state machine (see module comment
- * above). The caller is responsible for whatever session-level transition
- * and audit event accompany the cause; this function only moves the hold.
+ * above), but differ in `eventType`/`fromState`/`toState` (`BUYER_DECLINES`:
+ * `OFFER_PENDING` -> `OPEN`; the TTL-expiry and payment-failure self-loops:
+ * `HOLD_RELEASED` on `EXPIRED` or `PAYMENT_FAILED`). The caller supplies
+ * whichever applies via `ledger` (TICKET-403) — this function only moves the
+ * hold and appends the ledger entry the caller described; it does not decide
+ * *why* the hold is being released.
  *
  * A hold not currently `RESERVED` (already released, already committed, or
- * nonexistent) is a safe no-op: `{ resolved: false }`, never a thrown error.
+ * nonexistent) is a safe no-op: `{ resolved: false }`, never a thrown error,
+ * and no ledger event is appended in that case.
  */
 export async function releaseCampaignHold(
   database: NodePgDatabase,
   holdId: string,
+  ledger: CampaignHoldLedgerContext,
 ): Promise<ResolveCampaignHoldResult> {
-  return transitionHoldFromReserved(database, holdId, "RELEASED");
+  return transitionHoldFromReserved(database, holdId, "RELEASED", ledger);
 }
 
 /**
@@ -318,10 +418,15 @@ export async function releaseCampaignHold(
  * transaction to finish first (and its own outstanding read then reflects
  * this commit's outcome). Either order is safe; only running unsynchronized
  * is not.
+ *
+ * TICKET-403 — the ledger append below reuses this same transaction, so the
+ * commit and its `HOLD_COMMITTED` ledger entry are atomic with each other
+ * too, not just with the `merchant_policies` lock above.
  */
 export async function commitCampaignHold(
   database: NodePgDatabase,
   holdId: string,
+  ledger: CampaignHoldLedgerContext,
 ): Promise<ResolveCampaignHoldResult> {
   return database.transaction(async (tx): Promise<ResolveCampaignHoldResult> => {
     const holdLookup = await tx.execute<{ merchant_id: string }>(sql`
@@ -359,6 +464,10 @@ export async function commitCampaignHold(
     if (!row) {
       return { resolved: false };
     }
+
+    // TICKET-403 — same tx as the update above and the merchant_policies
+    // lock: the commit and its ledger entry commit or roll back together.
+    await appendHoldLedgerEvent(tx, ledger, row);
 
     return { resolved: true, hold: toSelectCampaignHold(row) };
   });
