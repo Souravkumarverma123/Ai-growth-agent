@@ -192,7 +192,7 @@ TICKET-111 (found and fixed here)
 
 ## ISSUE-009 — `createOrder` POSTs to Razorpay without reserving a local order first, so concurrent/retried calls can mint two orders for one offer
 
-Status: OPEN
+Status: FIXED
 Severity: HIGH
 Found in: TICKET-301 (flagged independently by CodeAnt on commit `fa2b1c2e`, rated MEDIUM there)
 Date: 2026-09-05
@@ -236,34 +236,61 @@ TICKET-301, P0, TODO).
 
 ### Fix
 
-Deferred to TICKET-302 by design. Do **not** implement it on the
-TICKET-301 branch: it needs a local orders table + migration in
-`packages/database` and a transactional "reserve local order, then POST,
-then persist rail id" flow tied to TICKET-111's offer-consume logic.
-Doing that here would break the read-only boundary `offer-repository.ts`
-was written to keep and cause the exact parallel-work collision
-CONTRACTS.md §2 warns about.
+Fixed by TICKET-302. `packages/database/repositories/orders.ts` (new)
+exports `reserveOrder(database, { offerId, amountMinor, currency })`: a
+single `INSERT` into `orders` (schema unchanged — `orders.offer_id` was
+already `notNull().unique()` in `models/payment.ts`, already migrated in
+`drizzle/0001_sour_dreadnoughts.sql` as `orders_offer_id_unique`, per
+TICKET-301's own frozen model). It relies on Postgres to reject a second
+concurrent insert for the same `offerId` at the database level (error code
+`23505`) and translates that into a clean domain result — `{ reserved:
+false, reason: "ORDER_ALREADY_EXISTS" }` — instead of letting the raw
+Postgres error escape.
 
-For the CodeAnt gate on the TICKET-301 PR: dismiss this finding with a
-reference to ISSUE-009 / TICKET-302. It is "not fixed on this branch by
-design", not "won't ever fix" — hence Status OPEN, not WONTFIX.
+`packages/payments/src/create-order.ts`'s `createOrder(offerId)` now calls
+`reserveLocalOrder` (a thin wrapper, `./src/order-repository.ts`, mirroring
+`./src/offer-repository.ts`'s existing pattern) BEFORE `createRazorpayOrder`,
+and only proceeds to the POST if the reservation succeeded. If it did not —
+an order already exists for this offer — `createOrder` throws a typed
+`OrderAlreadyExistsError` (exported from the package) and never reaches
+Razorpay. Once the POST does succeed, `attachRailOrderId` records the
+returned Razorpay order id/payload onto the reserved row (for human
+reconciliation and so TICKET-304's polling reconciler has a rail order id to
+poll) — a plain follow-up `UPDATE`, no part of the uniqueness guarantee
+itself.
+
+The new and changed code cites no rail-supplied idempotency header at all —
+the uniqueness guarantee is entirely our own unique constraint plus the
+reserve-before-POST ordering, exactly as `models/payment.ts`'s "IDEMPOTENCY
+IS OURS, NOT THE RAIL'S" doc comment always intended.
 
 ### Regression Test
 
-Owned by TICKET-302: a real-Postgres concurrency test — N concurrent
-`createOrder(offerId)` calls for one offer result in exactly one order
-row / one Razorpay POST. Also covered by TICKET-602's offer-lifecycle
-idempotency suite.
+`packages/database/tests/orders.test.ts` — a real-Postgres concurrency test:
+20 concurrent `reserveOrder` calls for the SAME `offerId` leave exactly one
+row `reserved: true` and every other call comes back the clean `{ reserved:
+false, reason: "ORDER_ALREADY_EXISTS" }` domain result, never a thrown raw
+Postgres error; a sequential-double-reserve variant of the same assertion;
+and an `amountMinor` validation test mirroring `campaign-holds.ts`'s
+convention. `packages/payments/tests/create-order.test.ts` — asserts
+`reserveLocalOrder` is called before `createRazorpayOrder` (call-order
+assertion), and that a reservation failure throws `OrderAlreadyExistsError`
+without ever calling `createRazorpayOrder`.
 
 ### Related Ticket
 
-TICKET-302 (owner), TICKET-301 (where found), TICKET-602 (invariant suite)
+TICKET-302 (owner, fixed here), TICKET-301 (where found), TICKET-602
+(invariant suite)
 
 ### Status History
 
 - 2026-09-05: OPEN — flagged by CodeAnt on commit `fa2b1c2e` during
   TICKET-301 review; validated as a real gap, confirmed already owned by
   TICKET-302, recorded here so TICKET-302 is not dropped.
+- 2026-09-05: FIXED — `reserveOrder`/`attachRailOrder` added to
+  `packages/database/repositories/orders.ts`; `createOrder` now reserves
+  before POSTing and throws `OrderAlreadyExistsError` on a duplicate,
+  verified by a 20-way concurrency test against the real database.
 
 ---
 

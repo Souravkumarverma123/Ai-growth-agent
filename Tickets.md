@@ -635,11 +635,11 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-302 — Offer-to-order uniqueness
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-111, TICKET-301
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-111, TICKET-301
 
-> **Confirmed gap (ISSUE-009):** CodeAnt independently flagged the missing
-> reserve-before-POST on TICKET-301's `createOrder`. TICKET-301 was left as
-> read-only by design; this ticket is where the race gets fixed. Do not drop it.
+> **Confirmed gap (ISSUE-009, now FIXED):** CodeAnt independently flagged the
+> missing reserve-before-POST on TICKET-301's `createOrder`. TICKET-301 was
+> left as read-only by design; this ticket is where the race got fixed.
 
 **Objective.** `offer_id → exactly one order`, enforced by the database.
 

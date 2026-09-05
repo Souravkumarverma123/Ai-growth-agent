@@ -1,6 +1,11 @@
 import type { SelectOffer } from "@repo/database/models/offer";
 
 import { getOfferById } from "./offer-repository";
+import {
+  attachRailOrderId,
+  cancelUnattachedOrder,
+  reserveLocalOrder,
+} from "./order-repository";
 import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } from "./razorpay-client";
 
 /**
@@ -17,18 +22,54 @@ import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } fr
  * `./razorpay-client.ts`'s module doc. `createOrder` only ever creates a
  * Razorpay order; a human buyer authorizes it from there (TICKET-303).
  *
- * KNOWN GAP (ISSUE-009): this function does not reserve or persist a local
- * order before the external POST, so concurrent or retried calls for one
- * `offerId` can create more than one Razorpay order. Offer-to-order
- * uniqueness is out of scope for TICKET-301 (kept read-only here to avoid
- * colliding with TICKET-111) and is the whole scope of TICKET-302 — do not
- * fix it on this branch.
+ * TICKET-302 — offer-to-order uniqueness (ISSUE-009, now FIXED).
+ * This function reserves a local `orders` row for `offerId` (`./order-repository.ts`
+ * -> `@repo/database/repositories/orders`, enforced by the unique constraint
+ * on `orders.offer_id`) BEFORE calling out to Razorpay, and only proceeds to
+ * `createRazorpayOrder` if that reservation actually succeeded. A concurrent
+ * or retried call for an `offerId` that already has a reservation never
+ * reaches Razorpay at all — it fails at the local `INSERT`, which Postgres's
+ * own unique index serializes, and surfaces as a thrown `OrderAlreadyExistsError`
+ * rather than a raw Postgres error or a silent second order. This is our own
+ * database-enforced idempotency, never anything supplied by Razorpay — see
+ * `packages/database/models/payment.ts`'s module doc ("IDEMPOTENCY IS OURS,
+ * NOT THE RAIL'S") and `packages/database/repositories/orders.ts`.
  */
+export class OrderAlreadyExistsError extends Error {
+  readonly offerId: string;
+
+  constructor(offerId: string) {
+    super(`createOrder: an order already exists for offerId "${offerId}"`);
+    this.name = "OrderAlreadyExistsError";
+    this.offerId = offerId;
+  }
+}
+
 export async function createOrder(offerId: string): Promise<RazorpayOrder> {
   const offer = await getOfferById(offerId);
-  const request = buildRazorpayOrderRequest(offer);
-  // ISSUE-009 / TICKET-302: no reserve-before-POST — duplicate orders possible under a race.
-  return createRazorpayOrder(request);
+
+  // Reserve-before-POST: the local row must exist, uniquely, before we ever
+  // talk to Razorpay. If it doesn't (an order already exists for this
+  // offer), we stop right here — no second POST, no raw DB error escaping.
+  const reservation = await reserveLocalOrder({ offerId: offer.id });
+
+  if (!reservation.reserved) {
+    throw new OrderAlreadyExistsError(offerId);
+  }
+
+  try {
+    const request = buildRazorpayOrderRequest(offer);
+    const razorpayOrder = await createRazorpayOrder(request);
+    // Record what the reservation actually produced, for human reconciliation
+    // and for TICKET-304's polling reconciler to have a rail order id to poll.
+    await attachRailOrderId(reservation.order.id, razorpayOrder);
+    return razorpayOrder;
+  } catch (error) {
+    // Razorpay or attach failed — free the unattached reservation so a retry
+    // can create the missing rail order instead of hitting OrderAlreadyExistsError.
+    await cancelUnattachedOrder(reservation.order.id).catch(() => {});
+    throw error;
+  }
 }
 
 /**
