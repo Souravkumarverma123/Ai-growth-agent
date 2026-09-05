@@ -4,6 +4,12 @@ import type { CommitmentValue, MerchantPolicy, SkuPolicy } from "../contracts/me
 import { COMMITMENT_TYPES } from "../contracts/merchant-policy";
 import type { MinorUnits } from "../contracts/money";
 import { computeBasketContribution } from "../economics/contribution";
+import {
+  assertGeneratedCandidateRespectsFloors,
+  assertOriginalBasketRespectsFloors,
+  assertSkuCatalogueIsSane,
+} from "./floor-enforcement";
+import { resolveConcessionFraction } from "./round-envelope";
 
 /**
  * TICKET-103 — candidate generator (PRD §8; CONTRACTS.md B4).
@@ -38,15 +44,20 @@ import { computeBasketContribution } from "../economics/contribution";
  * frozen `Candidate` shape.
  *
  * ============================================================================
- * THE ROUND ENVELOPE (RA-4) IS COMPUTED INLINE, NOT IMPORTED FROM TICKET-105
+ * THE ROUND ENVELOPE (RA-4) NOW LIVES IN TICKET-105'S OWN MODULE
  * ============================================================================
- * TICKET-105 ("Concession curve and round envelope") is still TODO, but this
- * ticket's own dependency list is only TICKET-102, so it does not block on
- * it. RA-4 (PRD §16, §7) already settles the arithmetic:
- * `MerchantPolicy.concessionCurve` applied to floor-derived headroom on the
- * original basket, done inline in {@link resolveConcessionFraction}. If
- * TICKET-105 later lands, extracting this into a shared function is a normal
- * refactor, not rework of this ticket.
+ * This generator originally computed the round envelope inline, because
+ * TICKET-105 ("Concession curve and round envelope") wasn't done yet and this
+ * ticket's own dependency list is only TICKET-102, so it never had to block
+ * on it. RA-4 (PRD §16, §7) settles the arithmetic — `MerchantPolicy.
+ * concessionCurve` applied to floor-derived headroom on the original basket —
+ * and that arithmetic has since been extracted verbatim into
+ * {@link resolveConcessionFraction} in `./round-envelope`, exactly the normal
+ * refactor this module's doc previously said TICKET-105 landing would be.
+ * This file now imports it rather than defining it; round-cap enforcement
+ * (`ROUND_LIMIT_REACHED`) lives alongside it as `evaluateRoundCap`, still not
+ * this generator's job (see that module's doc for why the two are separate
+ * functions).
  *
  * ============================================================================
  * FLOOR SAFETY IS STRUCTURAL, NOT A POST-HOC FILTER
@@ -60,9 +71,12 @@ import { computeBasketContribution } from "../economics/contribution";
  * bug can't leak a sub-floor line through the move types that merely carry
  * an original line forward unchanged. `pushCandidate` still re-asserts every
  * line of every constructed candidate before accepting it, as defense in
- * depth — the PRD's own defensive `FLOOR_BREACH` assertion (unreachable in
- * correct operation) belongs at mint time (TICKET-106), not here, but this
- * generator does not rely on that later check to uphold the invariant.
+ * depth. Both assertions, plus the catalogue sanity check, now live in
+ * TICKET-106's `./floor-enforcement` module and are imported here rather than
+ * defined inline — the PRD's own defensive `FLOOR_BREACH` assertion
+ * (unreachable in correct operation) belongs at mint time (also
+ * `floor-enforcement.ts`, as `assertNoFloorBreach`), not here, and this
+ * generator still does not rely on that later check to uphold the invariant.
  */
 
 // ---------------------------------------------------------------------------
@@ -180,67 +194,6 @@ function requireSkuPolicy(bySkuId: Map<string, SkuPolicy>, skuId: string): SkuPo
   return policy;
 }
 
-/**
- * Domain invariants not enforced by the zod schema, all fatal to this
- * module's reasoning if violated:
- *
- *  - a floor above list (both are independently just non-negative integers)
- *    would make every headroom calculation here negative and nonsensical —
- *    fails closed rather than silently producing a candidate priced above
- *    list "to stay above floor";
- *  - a duplicate `skuId` would make `indexSkuPoliciesById`'s last-write-wins
- *    `Map` silently disagree with the raw-array scans in
- *    {@link findAffinityAddCandidates} and {@link findSlowMovingAddCandidates}
- *    — one candidate build could price/floor-check off one record while
- *    everything routed through the map uses another;
- *  - a SKU from another merchant would let generation offer, price, and
- *    floor-check a basket line this policy has no authority over.
- */
-function assertSkuCatalogueIsSane(skuCatalogue: readonly SkuPolicy[], merchantId: string): void {
-  const seenSkuIds = new Set<string>();
-  for (const sku of skuCatalogue) {
-    if (sku.merchantId !== merchantId) {
-      throw new Error(
-        `generateCandidates: skuId "${sku.skuId}" belongs to merchantId "${sku.merchantId}", not policy merchantId "${merchantId}"`,
-      );
-    }
-    if (seenSkuIds.has(sku.skuId)) {
-      throw new Error(`generateCandidates: skuCatalogue contains duplicate skuId "${sku.skuId}"`);
-    }
-    seenSkuIds.add(sku.skuId);
-    if (sku.floorPriceMinor > sku.listPriceMinor) {
-      throw new Error(
-        `generateCandidates: skuId "${sku.skuId}" has floorPriceMinor (${sku.floorPriceMinor}) above listPriceMinor (${sku.listPriceMinor})`,
-      );
-    }
-  }
-}
-
-/**
- * Refuses to generate from an already-corrupted session: if `originalBasket`
- * itself carries a sub-floor line, every move type that carries that line
- * forward unchanged (ADD_SKU, ADD_SLOW_MOVING_SKU, INCREASE_QUANTITY,
- * COMMITMENT_SWAP all do) would otherwise silently inherit the breach. This
- * is not this ticket's own bug surface — TICKET-101's eligibility check and
- * whatever wrote `originalBasket` are upstream of it — but failing loudly
- * here is cheap and keeps "no generated candidate prices any line below its
- * floor" true unconditionally, not just for the one move type that
- * constructs new prices.
- */
-function assertOriginalBasketRespectsFloors(
-  originalBasket: Basket,
-  skuPoliciesById: Map<string, SkuPolicy>,
-): void {
-  for (const line of originalBasket.lines) {
-    const skuPolicy = requireSkuPolicy(skuPoliciesById, line.skuId);
-    if (line.unitPriceMinor < skuPolicy.floorPriceMinor) {
-      throw new Error(
-        `generateCandidates: originalBasket line for skuId "${line.skuId}" is already below floor (unitPriceMinor=${line.unitPriceMinor}, floorPriceMinor=${skuPolicy.floorPriceMinor})`,
-      );
-    }
-  }
-}
-
 function basketTotalMinor(basket: Basket): MinorUnits {
   let total = 0;
   for (const line of basket.lines) {
@@ -305,31 +258,6 @@ function selectAddableSkus(eligible: readonly SkuPolicy[], limit: number): SkuPo
 // ---------------------------------------------------------------------------
 // Move type 1 — PRICE_CONCESSION (PRD §8, slot 1)
 // ---------------------------------------------------------------------------
-
-/**
- * The round's economic envelope (RA-4): the fraction of floor-derived
- * headroom the concession curve permits releasing this round. Clamped —
- * never thrown — for a round beyond the curve's own length: round-cap
- * enforcement (`ROUND_LIMIT_REACHED`) is TICKET-105's job, not this one's,
- * so this generator stays usable for whatever round it's asked to generate
- * for. Clamping to the curve's *final* (and by construction maximum,
- * PRD §5.1) fraction never releases more than the merchant ever authorized
- * for any round — it only ever reuses an already-approved ceiling.
- */
-function resolveConcessionFraction(concessionCurve: readonly number[], roundIndex: number): number {
-  if (!Number.isInteger(roundIndex) || roundIndex < 1) {
-    throw new Error(`generateCandidates: roundIndex must be a positive integer, got ${roundIndex}`);
-  }
-  if (concessionCurve.length === 0) {
-    throw new Error("generateCandidates: policy.concessionCurve must not be empty");
-  }
-  const index = Math.min(roundIndex, concessionCurve.length) - 1;
-  const fraction = concessionCurve[index];
-  if (fraction === undefined) {
-    throw new Error("generateCandidates: unreachable — resolved concession index out of bounds");
-  }
-  return fraction;
-}
 
 /**
  * Original cart at the maximum concession permitted this round (PRD §8).
@@ -520,22 +448,16 @@ export function generateCandidates(input: CandidateGenerationInput): CandidateGe
 
   assertSkuCatalogueIsSane(skuCatalogue, policy.merchantId);
   const skuPoliciesById = indexSkuPoliciesById(skuCatalogue);
-  assertOriginalBasketRespectsFloors(originalBasket, skuPoliciesById);
+  assertOriginalBasketRespectsFloors(originalBasket, skuCatalogue);
 
   const candidates: GeneratedCandidate[] = [];
 
   const pushCandidate = (moveType: CandidateMoveType, basket: Basket): void => {
-    for (const line of basket.lines) {
-      const skuPolicy = requireSkuPolicy(skuPoliciesById, line.skuId);
-      if (line.unitPriceMinor < skuPolicy.floorPriceMinor) {
-        // Unreachable given the move-type constructors above; kept as
-        // defense in depth so a future change to this file fails loudly
-        // instead of silently emitting a sub-floor candidate.
-        throw new Error(
-          `generateCandidates: refusing to emit a ${moveType} candidate pricing skuId "${line.skuId}" below its floor`,
-        );
-      }
-    }
+    // Unreachable given the move-type constructors above; kept as defense in
+    // depth so a future change to this file fails loudly instead of silently
+    // emitting a sub-floor candidate. Extracted to TICKET-106's
+    // floor-enforcement module — see this file's module doc.
+    assertGeneratedCandidateRespectsFloors(moveType, basket, skuCatalogue);
 
     const contributionMinor = computeBasketContribution(basket, skuCatalogue, policy.allowedCommitments);
     const contributionDeltaMinor = requireSafeInteger(

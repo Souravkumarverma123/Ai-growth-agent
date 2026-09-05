@@ -300,7 +300,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-105 — Concession curve and round envelope
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 0
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 0
 
 **Objective.** Fix the economic envelope per round, deterministically, before the model is consulted.
 
@@ -325,7 +325,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-106 — Floor enforcement and defensive assertion
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-103
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-103
 
 **Objective.** Make a sub-floor price structurally unreachable, and halt loudly if one ever appears.
 
@@ -1097,7 +1097,7 @@ Good tests here assert **external behaviour**, never internal structure. "A Tier
 
 ### TICKET-605 — Static boundary checks
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-006
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-006
 
 **Objective.** Enforce two claims statically, because that is stronger than testing them.
 
