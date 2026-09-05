@@ -394,7 +394,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-109 — Objective ordering and slow-moving tolerance
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-102, TICKET-104
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-102, TICKET-104
 
 **Objective.** Select within the feasible set by a stated deterministic ordering.
 
