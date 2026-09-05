@@ -6,7 +6,12 @@ import {
   cancelUnattachedOrder,
   reserveLocalOrder,
 } from "./order-repository";
-import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } from "./razorpay-client";
+import {
+  createRazorpayOrder,
+  RazorpayNetworkError,
+  type RazorpayOrder,
+  type RazorpayOrderRequest,
+} from "./razorpay-client";
 
 /**
  * TICKET-301 — CONTRACTS.md §2, boundary rule B3.
@@ -50,13 +55,26 @@ import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } fr
  *     against Razorpay (TICKET-304's polling reconciler), not a retry.
  *
  * The same two-failure-mode distinction applies to a fresh attempt's own
- * POST + attach sequence: if `createRazorpayOrder` itself throws, no order
- * was ever created, so the reservation is freed (`cancelUnattachedOrder`)
- * and a caller's retry is safe. If the POST succeeds but `attachRailOrderId`
- * then fails, a live Razorpay order now exists — the reservation is
- * deliberately left in place (not freed) so nothing else can reserve this
- * offer's slot, and `OrderReservationIncompleteError` is thrown instead of
- * silently losing track of it.
+ * POST + attach sequence, and it takes three shapes, not two, because
+ * `createRazorpayOrder` failing is not on its own proof that no order was
+ * created:
+ *   - `createRazorpayOrder` throws anything OTHER than a
+ *     `RazorpayNetworkError` (missing credentials, or a definitive non-2xx
+ *     response FROM Razorpay itself): no order was created, full stop — the
+ *     reservation is freed (`cancelUnattachedOrder`) and a retry is safe.
+ *   - `createRazorpayOrder` throws a `RazorpayNetworkError` (the request
+ *     itself failed at the network level — see `razorpay-client.ts`): the
+ *     outcome is genuinely unknown. The request may never have reached
+ *     Razorpay, or it may have reached them, created a real order, and only
+ *     the response was lost. Freeing the reservation here would be exactly
+ *     as unsafe as freeing it after a confirmed success, so this is treated
+ *     the same as the case below: the reservation stays, and
+ *     `OrderReservationIncompleteError` is thrown.
+ *   - The POST succeeds but `attachRailOrderId` then fails: a live Razorpay
+ *     order is now confirmed to exist — the reservation is deliberately
+ *     left in place (not freed) so nothing else can reserve this offer's
+ *     slot, and `OrderReservationIncompleteError` is thrown instead of
+ *     silently losing track of it.
  */
 export class OrderAlreadyExistsError extends Error {
   readonly offerId: string;
@@ -113,8 +131,16 @@ export async function createOrder(offerId: string): Promise<RazorpayOrder> {
   try {
     razorpayOrder = await createRazorpayOrder(buildRazorpayOrderRequest(offer));
   } catch (error) {
-    // Razorpay never created an order for this attempt — safe to free the
-    // reservation so a retry can attempt a fresh POST.
+    if (error instanceof RazorpayNetworkError) {
+      // Outcome unknown — the request may have reached Razorpay and created
+      // an order, with only the response lost. Do NOT free the reservation
+      // or allow a blind retry (see module doc); this needs reconciliation,
+      // same as an attach failure below.
+      throw new OrderReservationIncompleteError(offerId, reservation.order.id, null);
+    }
+    // A definitive failure (missing credentials, or Razorpay itself
+    // rejected the request with a non-2xx response) — no order was ever
+    // created, so it's safe to free the reservation for a retry.
     await cancelUnattachedOrder(reservation.order.id).catch(() => {});
     throw error;
   }

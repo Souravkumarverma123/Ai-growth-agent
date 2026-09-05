@@ -43,6 +43,28 @@ export type RazorpayOrder = {
   created_at: number;
 };
 
+/**
+ * Thrown when `fetch` itself fails — DNS failure, connection refused, a
+ * timeout, a connection reset mid-request or mid-response. Unlike every
+ * other error this module throws (missing credentials, or a definitive
+ * non-2xx response FROM Razorpay), this one is genuinely ambiguous: the
+ * request may never have reached Razorpay's servers, or it may have
+ * reached them, been processed, and created a real order, with only the
+ * response lost on the way back. A caller must never assume "no order was
+ * created" for this error the way it safely can for every other failure
+ * `createRazorpayOrder` throws — see `createOrder`'s own handling in
+ * `create-order.ts`.
+ */
+export class RazorpayNetworkError extends Error {
+  constructor(cause: unknown) {
+    super(
+      "createRazorpayOrder: network error calling Razorpay — outcome unknown, do not assume no order was created",
+      { cause },
+    );
+    this.name = "RazorpayNetworkError";
+  }
+}
+
 function getCredentials(): { keyId: string; keySecret: string } {
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
@@ -68,14 +90,19 @@ export async function createRazorpayOrder(
   const { keyId, keySecret } = getCredentials();
   const basicAuth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
 
-  const response = await fetch(RAZORPAY_ORDERS_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Basic ${basicAuth}`,
-    },
-    body: JSON.stringify(request),
-  });
+  let response: Response;
+  try {
+    response = await fetch(RAZORPAY_ORDERS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${basicAuth}`,
+      },
+      body: JSON.stringify(request),
+    });
+  } catch (error) {
+    throw new RazorpayNetworkError(error);
+  }
 
   if (!response.ok) {
     const body = await response.text();

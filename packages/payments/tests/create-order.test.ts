@@ -2,6 +2,7 @@ import type { SelectOffer } from "@repo/database/models/offer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createOrder, OrderAlreadyExistsError, OrderReservationIncompleteError } from "../src/create-order";
+import { RazorpayNetworkError } from "../src/razorpay-client";
 
 /**
  * TICKET-301 — CONTRACTS.md §2, B3.
@@ -31,7 +32,11 @@ vi.mock("../src/order-repository", () => ({
   cancelUnattachedOrder: (orderId: string) => cancelUnattachedOrder(orderId),
 }));
 
-vi.mock("../src/razorpay-client", () => ({
+vi.mock("../src/razorpay-client", async (importOriginal) => ({
+  // RazorpayNetworkError is the REAL class (not re-implemented here) so
+  // `error instanceof RazorpayNetworkError` in create-order.ts works exactly
+  // as it would against a real razorpay-client.ts failure.
+  ...(await importOriginal<typeof import("../src/razorpay-client")>()),
   createRazorpayOrder: (request: unknown) => createRazorpayOrder(request),
 }));
 
@@ -237,14 +242,32 @@ describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
     expect(attachRailOrderId).toHaveBeenCalledWith("local-order-xyz", { id: "order_rzp_123" });
   });
 
-  it("when Razorpay fails, the reservation is freed so a retry can create the rail order", async () => {
-    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
-    reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
-    createRazorpayOrder.mockRejectedValue(new Error("razorpay down"));
+  it(
+    "when Razorpay definitively rejects the request (e.g. a 4xx, not a network failure), " +
+      "the reservation is freed so a retry can create the rail order",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+      createRazorpayOrder.mockRejectedValue(new Error("razorpay down"));
 
-    await expect(createOrder("offer-1")).rejects.toThrow(/razorpay down/);
-    expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
-  });
+      await expect(createOrder("offer-1")).rejects.toThrow(/razorpay down/);
+      expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
+    },
+  );
+
+  it(
+    "when the POST fails with RazorpayNetworkError (outcome unknown), the reservation is " +
+      "NOT freed — Razorpay may have created an order despite the response never arriving",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+      createRazorpayOrder.mockRejectedValue(new RazorpayNetworkError(new Error("ECONNRESET")));
+
+      await expect(createOrder("offer-1")).rejects.toThrow(OrderReservationIncompleteError);
+      expect(cancelUnattachedOrder).not.toHaveBeenCalled();
+      expect(attachRailOrderId).not.toHaveBeenCalled();
+    },
+  );
 
   it(
     "when attach fails after Razorpay succeeds, the reservation is NOT freed — " +
