@@ -49,13 +49,16 @@ import type { MessageFrame, Offer } from "@repo/policy";
  * WHAT IS NEVER VOLUNTEERED, AND HOW A TRUTHFUL ANSWER STILL WORKS
  * ============================================================================
  * `composeOfferMessage` never mentions `offer.expiresAt`, and its input has
- * no field for `Candidate.clearsSlowMoving` at all — it cannot volunteer
- * either fact even by accident, because there is no slot for them in any of
- * the five templates. `answerBuyerQuestion` is the ONLY path to either fact,
- * and exists precisely so that a direct buyer question still gets a truthful
+ * no field for slow-moving status at all — it cannot volunteer either fact
+ * even by accident, because there is no slot for them in any of the five
+ * templates. `answerBuyerQuestion` is the ONLY path to either fact, and
+ * exists precisely so that a direct buyer question still gets a truthful
  * answer (this ticket's own acceptance criteria): it reads the real
  * `offer.expiresAt` for `"EXPIRY"`, and the real, caller-supplied
- * `clearsSlowMoving` for `"SLOW_MOVING_STATUS"` — never an invented one.
+ * `basketContainsSlowMovingItem` for `"SLOW_MOVING_STATUS"` — never an
+ * invented one, and never `Candidate.clearsSlowMoving` (see
+ * `describeSlowMovingStatus`'s own doc for why that flag answers a different
+ * question and would be untruthful here).
  * Wiring "the buyer just asked about X" to a call to this function is a
  * future buyer-conversation ticket's job (TICKET-206 is TODO as of this
  * writing); this module only guarantees that WHEN that call is made, the
@@ -210,7 +213,13 @@ export type BuyerQuestionTopic = (typeof BUYER_QUESTION_TOPICS)[number];
  * timestamp `Offer.expiresAt` itself serializes to).
  */
 export function describeOfferExpiry(offer: Offer, now: Date): string {
-  const isExpired = now.getTime() >= offer.expiresAt.getTime();
+  // Strictly-after, matching the frozen state machine's own TTL_ELAPSED guard
+  // ("now > expiresAt", `contracts/state-machine.ts`) and the same boundary
+  // `acceptOffer`'s CAS and `evaluateOfferAcceptance` already enforce
+  // (`packages/database/repositories/offers.ts`,
+  // `packages/policy/acceptance/acceptance.ts`) — at the exact expiry instant
+  // policy still accepts the offer, so this must not report it expired.
+  const isExpired = now.getTime() > offer.expiresAt.getTime();
   const text = isExpired
     ? `This offer expired at ${offer.expiresAt.toISOString()}.`
     : `This offer is valid until ${offer.expiresAt.toISOString()}.`;
@@ -220,13 +229,22 @@ export function describeOfferExpiry(offer: Offer, now: Date): string {
 
 /**
  * Truthfully answers a direct question about slow-moving status. Takes
- * `clearsSlowMoving` as a plain boolean rather than reading it off `offer`,
- * because `Offer` carries no such field — it lives on the `Candidate` this
- * offer was minted from (TICKET-109's tolerance flag); the caller must
- * supply the value from that candidate.
+ * `basketContainsSlowMovingItem` as a plain boolean rather than reading it
+ * off `offer` (`Offer.basket.lines` carries no per-line slow-moving flag —
+ * that lives on the merchant's `SkuPolicy` catalog, keyed by `skuId`, which
+ * this package has no access to, B2) or off `Candidate.clearsSlowMoving`.
+ *
+ * `clearsSlowMoving` is NOT this fact: `generation/candidates.ts`'s
+ * `introducesSlowMovingInventory` sets it only when a candidate added MORE
+ * of a slow-moving SKU than the buyer's original cart already held — a cart
+ * that already contained one, unchanged by the candidate, yields
+ * `clearsSlowMoving: false` while genuinely containing a slow-moving item.
+ * Answering "no" from that flag would be untruthful. The caller must instead
+ * compute whether ANY line in `offer.basket.lines` resolves to a
+ * `slowMoving: true` SKU in the merchant's catalog, and supply that.
  */
-export function describeSlowMovingStatus(clearsSlowMoving: boolean): string {
-  const text = clearsSlowMoving
+export function describeSlowMovingStatus(basketContainsSlowMovingItem: boolean): string {
+  const text = basketContainsSlowMovingItem
     ? "Yes — this basket includes an item flagged as slow-moving in our system."
     : "No, this basket doesn't include any item flagged as slow-moving.";
   assertNoScarcityOrUrgencyLanguage(text);
@@ -238,8 +256,11 @@ export type AnswerBuyerQuestionInput = {
   readonly offer: Offer;
   /** Only read for `"EXPIRY"`. */
   readonly now: Date;
-  /** Only read for `"SLOW_MOVING_STATUS"` — see {@link describeSlowMovingStatus}. */
-  readonly clearsSlowMoving?: boolean;
+  /** Only read for `"SLOW_MOVING_STATUS"` — see
+   *  {@link describeSlowMovingStatus}'s doc for why this must be computed
+   *  from the basket against the SKU catalog, never from
+   *  `Candidate.clearsSlowMoving`. */
+  readonly basketContainsSlowMovingItem?: boolean;
 };
 
 /**
@@ -253,12 +274,12 @@ export function answerBuyerQuestion(input: AnswerBuyerQuestionInput): string {
     case "EXPIRY":
       return describeOfferExpiry(input.offer, input.now);
     case "SLOW_MOVING_STATUS":
-      if (input.clearsSlowMoving === undefined) {
+      if (input.basketContainsSlowMovingItem === undefined) {
         throw new Error(
-          "answerBuyerQuestion: clearsSlowMoving is required to answer SLOW_MOVING_STATUS truthfully",
+          "answerBuyerQuestion: basketContainsSlowMovingItem is required to answer SLOW_MOVING_STATUS truthfully",
         );
       }
-      return describeSlowMovingStatus(input.clearsSlowMoving);
+      return describeSlowMovingStatus(input.basketContainsSlowMovingItem);
     default: {
       const _exhaustive: never = input.topic;
       throw new Error(`answerBuyerQuestion: unknown topic "${String(_exhaustive)}"`);

@@ -172,23 +172,23 @@ describe("slow-moving status is never volunteered by composeOfferMessage, but an
     }
   });
 
-  it("answerBuyerQuestion truthfully confirms when asked directly, and the candidate did clear a slow-moving SKU", () => {
+  it("answerBuyerQuestion truthfully confirms when asked directly, and the basket does contain a slow-moving item", () => {
     const answer = answerBuyerQuestion({
       topic: "SLOW_MOVING_STATUS",
       offer: baseOffer,
       now: NOW,
-      clearsSlowMoving: true,
+      basketContainsSlowMovingItem: true,
     });
     expect(answer).toMatch(/slow-moving/i);
     expect(answer.toLowerCase()).toContain("yes");
   });
 
-  it("answerBuyerQuestion truthfully denies when asked directly, and the candidate did not clear one", () => {
+  it("answerBuyerQuestion truthfully denies when asked directly, and the basket contains none", () => {
     const answer = answerBuyerQuestion({
       topic: "SLOW_MOVING_STATUS",
       offer: baseOffer,
       now: NOW,
-      clearsSlowMoving: false,
+      basketContainsSlowMovingItem: false,
     });
     expect(answer.toLowerCase()).toContain("no");
   });
@@ -226,6 +226,13 @@ describe("expiry is never volunteered by composeOfferMessage, but answered truth
     expect(answer.toLowerCase()).toContain("expired");
   });
 
+  it("at the exact expiry instant, reports the offer as still valid — matching the state machine's strict TTL_ELAPSED guard (now > expiresAt, never >=)", () => {
+    const exactlyAtExpiry = new Date(baseOffer.expiresAt.getTime());
+    const answer = describeOfferExpiry(baseOffer, exactlyAtExpiry);
+    expect(answer.toLowerCase()).toContain("valid");
+    expect(answer.toLowerCase()).not.toContain("expired");
+  });
+
   it("answerBuyerQuestion('EXPIRY') delegates to describeOfferExpiry and stays numerically grounded", () => {
     const answer = answerBuyerQuestion({ topic: "EXPIRY", offer: baseOffer, now: NOW });
     expect(answer).toContain(baseOffer.expiresAt.toISOString());
@@ -247,10 +254,10 @@ describe("expiry is never volunteered by composeOfferMessage, but answered truth
 // ---------------------------------------------------------------------------
 
 describe("answerBuyerQuestion — a closed set of truthful, on-demand answers", () => {
-  it("throws asking about SLOW_MOVING_STATUS without supplying the real candidate flag", () => {
+  it("throws asking about SLOW_MOVING_STATUS without supplying the real basket flag", () => {
     expect(() =>
       answerBuyerQuestion({ topic: "SLOW_MOVING_STATUS", offer: baseOffer, now: NOW }),
-    ).toThrow(/clearsSlowMoving is required/);
+    ).toThrow(/basketContainsSlowMovingItem is required/);
   });
 
   it("every MessageFrame produces some composable message (no frame is unhandled)", () => {

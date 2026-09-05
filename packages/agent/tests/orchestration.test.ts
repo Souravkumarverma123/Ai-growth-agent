@@ -9,6 +9,7 @@ import {
   type RoundState,
   type RunNegotiationRoundInput,
 } from "../orchestration";
+import { composeOfferMessage } from "../message";
 import { fakeCandidate } from "./support/fake-candidate";
 
 /**
@@ -149,6 +150,21 @@ describe("runNegotiationRound — round 1 exposes only Tier 1 candidates to the 
     expect(result.offer.candidateId).toBe("cand_tier1");
     expect(result.offer.tier).toBe(1);
     expect(result.nextState).toEqual({ roundIndex: 2, tier1Refused: false });
+  });
+
+  it("OFFER_MINTED's message is produced by composeOfferMessage (TICKET-203), not a second, unconstrained path", async () => {
+    const model = new RecordingModel({ candidateId: "cand_tier1", messageFrame: "FINAL_POSITION" });
+
+    const result = await runNegotiationRound(baseRoundInput({ model }));
+
+    if (result.status !== "OFFER_MINTED") throw new Error(`expected OFFER_MINTED, got ${result.status}`);
+    // Recomputing independently from the same offer + frame and asserting
+    // equality proves this ticket's public outbound path — the only one a
+    // real caller (TICKET-204) will ever see — actually routes through the
+    // constrained composer, not merely that the composer works in isolation.
+    expect(result.message).toBe(
+      composeOfferMessage({ offer: result.offer, messageFrame: "FINAL_POSITION" }),
+    );
   });
 });
 
