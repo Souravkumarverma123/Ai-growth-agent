@@ -212,10 +212,11 @@ export function resolveOfferMintedTransition(
     }
     return lookupTransition("OPEN", "OFFER_MINTED", "TIER1_OFFERED");
   }
-  if (!candidate.feasible) {
+  if (!candidate.feasible || candidate.infeasibleReason !== null) {
     throw new Error(
-      "resolveOfferMintedTransition: candidate is tier 2 but infeasible — an infeasible tier 2 " +
-        "candidate is a MINT_ATTEMPTED outcome (resolveMintAttemptedTransition), never an OFFER_MINTED one",
+      "resolveOfferMintedTransition: candidate is tier 2 but feasible/infeasibleReason contradict " +
+        "a mintable candidate — infeasible tier 2 candidates are MINT_ATTEMPTED outcomes, never " +
+        "OFFER_MINTED ones",
     );
   }
   if (!tier1Refused) {
