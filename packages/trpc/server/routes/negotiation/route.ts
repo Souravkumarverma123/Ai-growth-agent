@@ -216,6 +216,28 @@ function ledgerContextFromTransition(
   };
 }
 
+/**
+ * `acceptOffer`'s transaction returns one of these instead of throwing for
+ * the autonomous-payment-blocked case — see that procedure's own comment on
+ * why the TRPCError has to be thrown AFTER the transaction commits, not
+ * from inside it.
+ */
+type AcceptOfferTxResult =
+  | { blocked: true; reasonCode: string }
+  | {
+      blocked: false;
+      value: {
+        accepted: boolean;
+        reasonCode: string;
+        paymentHandle: {
+          orderId: string;
+          railOrderId: string;
+          amountMinor: number;
+          currency: "INR";
+        } | null;
+      };
+    };
+
 export const negotiationRouter = router({
   getSessionContext: publicProcedure
     .meta({ openapi: { method: "GET", path: getPath("/session/{sessionId}"), tags: TAGS } })
@@ -696,7 +718,15 @@ export const negotiationRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      return ctx.db.transaction(async (tx) => {
+      // The autonomous-payment gate below must APPEND its refusal to the
+      // ledger and have that write actually survive — but this whole
+      // handler runs inside one transaction (for the FOR UPDATE race fix),
+      // and throwing from INSIDE a transaction rolls back everything in it,
+      // including that same audit write. So the transaction below never
+      // throws for this case; it returns a "blocked" result instead, and the
+      // TRPCError is thrown out here, only once the transaction (audit event
+      // included) has actually committed.
+      const txResult = await ctx.db.transaction(async (tx): Promise<AcceptOfferTxResult> => {
         // FOR UPDATE: serializes against a concurrent respondToOffer/acceptOffer
         // on the same session — see negotiation-sessions.ts's own doc. Without
         // this, an accept and a decline could both read OFFER_PENDING and race
@@ -731,10 +761,7 @@ export const negotiationRouter = router({
               offerId: offerBeforeAccept.id,
             }),
           );
-          throw new TRPCError({
-            code: "NOT_IMPLEMENTED",
-            message: `Autonomous payment execution is not implemented (TICKET-306). Reason: ${paymentTransition.reasonCode}.`,
-          });
+          return { blocked: true, reasonCode: paymentTransition.reasonCode };
         }
 
         const now = new Date();
@@ -798,7 +825,7 @@ export const negotiationRouter = router({
             await updateNegotiationSession(tx, session.id, { state: transition.to });
           }
 
-          return { accepted: false, reasonCode: result.reasonCode, paymentHandle: null };
+          return { blocked: false, value: { accepted: false, reasonCode: result.reasonCode, paymentHandle: null } };
         }
 
         const offer = result.offer;
@@ -838,15 +865,30 @@ export const negotiationRouter = router({
         }
 
         return {
-          accepted: true,
-          reasonCode: acceptTransition.reasonCode,
-          paymentHandle: {
-            orderId: localOrder.id,
-            railOrderId: railOrder.id,
-            amountMinor: offer.totalMinor,
-            currency: "INR" as const,
+          blocked: false,
+          value: {
+            accepted: true,
+            reasonCode: acceptTransition.reasonCode,
+            paymentHandle: {
+              orderId: localOrder.id,
+              railOrderId: railOrder.id,
+              amountMinor: offer.totalMinor,
+              currency: "INR" as const,
+            },
           },
         };
       });
+
+      if (txResult.blocked) {
+        // Thrown only now — the transaction above has already committed, so
+        // the AUTONOMOUS_PAYMENT_NOT_AUTHORIZED audit event this throw is
+        // reporting genuinely persisted, instead of being rolled back by it.
+        throw new TRPCError({
+          code: "NOT_IMPLEMENTED",
+          message: `Autonomous payment execution is not implemented (TICKET-306). Reason: ${txResult.reasonCode}.`,
+        });
+      }
+
+      return txResult.value;
     }),
 });

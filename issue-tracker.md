@@ -69,6 +69,77 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-013 — `acceptOffer`'s autonomous-payment refusal threw from inside its own transaction, silently rolling back the audit event it was reporting
+
+Status: FIXED
+Severity: CRITICAL
+Found in: closing out TICKET-306 (adding its required "flag flipped to true"
+regression test surfaced this — the test asserted the refusal's audit event
+existed and it didn't)
+Date: 2026-09-06
+Violates invariant: #14 (audit integrity) and #17 (fail closed) — the
+refusal itself failed closed correctly (offer never consumed, no order
+created, no capture reachable), but the LEDGER's own record of why it
+failed closed did not survive.
+
+### Problem
+
+`acceptOffer` (`packages/trpc/server/routes/negotiation/route.ts`) wraps its
+entire body in `ctx.db.transaction(async (tx) => {...})` (this session's own
+earlier fix for the accept/decline race, ISSUE-012's sibling). The
+autonomous-payment gate inside that transaction did:
+
+```ts
+await appendAuditEvent(tx, auditParamsFromTransition(paymentTransition, {...}));
+throw new TRPCError({ code: "NOT_IMPLEMENTED", ... });
+```
+
+Throwing from inside a `drizzle` transaction callback rolls back everything
+written in that transaction and re-throws the error to the caller. The
+`appendAuditEvent` call one line above the throw was therefore never
+actually committed — the client correctly received `NOT_IMPLEMENTED`, but
+`AUTONOMOUS_PAYMENT_NOT_AUTHORIZED` never appeared in `audit_events` at all,
+directly contradicting TICKET-306's own acceptance criterion ("the refusal
+is audited with its reason code").
+
+### Root Cause
+
+Introduced by wrapping `acceptOffer` in a transaction for a DIFFERENT reason
+(the accept/decline race fix) without re-examining every existing early
+exit inside it for whether it still needed to survive a throw. A throw
+inside a transaction and "record why, then fail" are structurally
+incompatible in the same statement sequence — the second write undoes the
+first.
+
+### Fix
+
+The transaction's callback no longer throws for this case; it returns a
+discriminated `AcceptOfferTxResult` (`{ blocked: true, reasonCode }` or
+`{ blocked: false, value }`). The `TRPCError` is thrown OUTSIDE the
+transaction, only after it has resolved — by which point the audit event
+has actually committed. Every other early exit in this same transaction
+(the declined/expired branches, the success branch) was already a plain
+`return`, never a `throw`, so none of them needed this change — this was
+the one path that mixed the two.
+
+### Regression Test
+
+`packages/trpc/tests/negotiation-route.test.ts` — "acceptOffer fails closed
+with NOT_IMPLEMENTED when autonomousPaymentExecution is true..." (added
+while closing TICKET-306) asserts the audit event, the offer's untouched
+status, and the session's untouched state all survive the throw — this is
+exactly the assertion that caught the bug (it failed before the fix).
+
+### Related Ticket
+
+TICKET-306, TICKET-204 (the transaction wrap this bug lived inside)
+
+### Status History
+
+- 2026-09-06: FIXED
+
+---
+
 ## ISSUE-012 — Five composition gaps surfaced by TICKET-204's end-to-end wiring
 
 Status: OPEN (partially mitigated in TICKET-204; each sub-issue names the ticket that should actually close it)
