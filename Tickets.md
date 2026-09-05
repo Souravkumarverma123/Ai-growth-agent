@@ -611,7 +611,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-301 — Razorpay test-mode order creation
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-110
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-110
 
 **Objective.** Create an order from an offer id and nothing else.
 
