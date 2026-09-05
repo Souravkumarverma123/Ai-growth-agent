@@ -329,6 +329,32 @@ describe("fails closed on precision loss beyond Number.MAX_SAFE_INTEGER (CONTRAC
   });
 });
 
+describe("fails closed on a non-positive quantity", () => {
+  it("throws rather than letting a negative quantity flip a line's contribution sign", () => {
+    const basketWithNegativeQuantity: Basket = {
+      currency: "INR",
+      commitments: [],
+      lines: [{ skuId: SERUM_SKU_ID, quantity: -1, unitPriceMinor: 180000 }],
+    };
+
+    expect(() =>
+      computeBasketContribution(basketWithNegativeQuantity, skuPolicies, allowedCommitments),
+    ).toThrow(/quantity.*must be positive/i);
+  });
+
+  it("throws rather than silently contributing zero for a zero quantity", () => {
+    const basketWithZeroQuantity: Basket = {
+      currency: "INR",
+      commitments: [],
+      lines: [{ skuId: SERUM_SKU_ID, quantity: 0, unitPriceMinor: 180000 }],
+    };
+
+    expect(() =>
+      computeBasketContribution(basketWithZeroQuantity, skuPolicies, allowedCommitments),
+    ).toThrow(/quantity.*must be positive/i);
+  });
+});
+
 describe("fails closed on inconsistent policy data (CONTRACTS.md §6)", () => {
   it("throws rather than silently under-counting a basket line with no matching SKU policy", () => {
     const basketWithUnknownSku: Basket = {
