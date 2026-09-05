@@ -43,7 +43,11 @@ function canonicalize(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    // Object.create(null): a plain `{}` inherits Object.prototype's `__proto__`
+    // accessor, so `sorted[key] = ...` for key === "__proto__" would set the
+    // prototype instead of creating a serializable own property, silently
+    // dropping that field from the hash input.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(record).sort()) {
       sorted[key] = canonicalize(record[key]);
     }

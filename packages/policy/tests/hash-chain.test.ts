@@ -146,6 +146,16 @@ describe("computeEventHash — deterministic content hashing", () => {
     expect(computeEventHash(first)).toBe(computeEventHash(second));
   });
 
+  it("hashes a payload's own enumerable __proto__ key as a real field instead of dropping it", () => {
+    const withoutProtoKey: HashableAuditEvent = { ...baseEvent, payload: { cartAgeSeconds: 900 } };
+    const withProtoKey: HashableAuditEvent = {
+      ...baseEvent,
+      payload: JSON.parse(`{"cartAgeSeconds":900,"__proto__":{"polluted":true}}`) as Record<string, unknown>,
+    };
+
+    expect(computeEventHash(withProtoKey)).not.toBe(computeEventHash(withoutProtoKey));
+  });
+
   it.each<[string, Partial<HashableAuditEvent>]>([
     ["sequence", { sequence: 1 }],
     ["sessionId", { sessionId: "22222222-2222-2222-2222-222222222222" }],
