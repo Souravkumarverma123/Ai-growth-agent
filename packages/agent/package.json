@@ -1,0 +1,21 @@
+{
+  "name": "@repo/agent",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "eslint": "^9.39.5"
+  },
+  "dependencies": {
+    "@repo/policy": "workspace:*",
+    "zod": "^4.5.4"
+  }
+}
