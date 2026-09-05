@@ -1,23 +1,32 @@
 import type { SelectOffer } from "@repo/database/models/offer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createOrder } from "../src/create-order";
+import { createOrder, OrderAlreadyExistsError } from "../src/create-order";
 
 /**
  * TICKET-301 — CONTRACTS.md §2, B3.
+ * TICKET-302 — offer-to-order uniqueness (reserve-before-POST).
  *
- * These tests mock both of `createOrder`'s dependencies (the offer lookup
- * and the Razorpay client) so the whole flow is exercised — offerId in,
- * Razorpay request out — with no real database connection and no real
- * network call. That keeps this fast and hermetic while still proving the
- * acceptance criteria behaviourally, not just against the pure helper.
+ * These tests mock every one of `createOrder`'s dependencies (the offer
+ * lookup, the local-order reservation, and the Razorpay client) so the
+ * whole flow is exercised — offerId in, Razorpay request out — with no real
+ * database connection and no real network call. That keeps this fast and
+ * hermetic while still proving the acceptance criteria behaviourally, not
+ * just against the pure helper.
  */
 
 const getOfferById = vi.fn();
+const reserveLocalOrder = vi.fn();
+const attachRailOrderId = vi.fn();
 const createRazorpayOrder = vi.fn();
 
 vi.mock("../src/offer-repository", () => ({
   getOfferById: (offerId: string) => getOfferById(offerId),
+}));
+
+vi.mock("../src/order-repository", () => ({
+  reserveLocalOrder: (params: unknown) => reserveLocalOrder(params),
+  attachRailOrderId: (orderId: string, railOrder: unknown) => attachRailOrderId(orderId, railOrder),
 }));
 
 vi.mock("../src/razorpay-client", () => ({
@@ -46,9 +55,18 @@ function makeOffer(overrides: Partial<SelectOffer> = {}): SelectOffer {
   } as SelectOffer;
 }
 
+function makeReservation(overrides: { order?: Partial<{ id: string }> } = {}) {
+  return { reserved: true as const, order: { id: "local-order-1", ...overrides.order } };
+}
+
 beforeEach(() => {
   getOfferById.mockReset();
+  reserveLocalOrder.mockReset();
+  attachRailOrderId.mockReset();
   createRazorpayOrder.mockReset();
+
+  reserveLocalOrder.mockResolvedValue(makeReservation());
+  attachRailOrderId.mockResolvedValue(undefined);
   createRazorpayOrder.mockResolvedValue({ id: "order_mock" });
 });
 
@@ -119,5 +137,68 @@ describe("createOrder(offerId)", () => {
 
     await expect(createOrder("missing")).rejects.toThrow(/no offer found/);
     expect(createRazorpayOrder).not.toHaveBeenCalled();
+    expect(reserveLocalOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
+  it("reserves the local order BEFORE calling Razorpay, never after or in parallel", async () => {
+    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+
+    const callOrder: string[] = [];
+    reserveLocalOrder.mockImplementation(async () => {
+      callOrder.push("reserve");
+      return makeReservation();
+    });
+    createRazorpayOrder.mockImplementation(async () => {
+      callOrder.push("post");
+      return { id: "order_mock" };
+    });
+
+    await createOrder("offer-1");
+
+    expect(callOrder).toEqual(["reserve", "post"]);
+  });
+
+  it(
+    "when reservation fails because an order already exists for this offer, " +
+      "createOrder surfaces a clean OrderAlreadyExistsError and never reaches Razorpay",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+
+      await expect(createOrder("offer-1")).rejects.toThrow(OrderAlreadyExistsError);
+      await expect(createOrder("offer-1")).rejects.toThrow(/already exists/);
+
+      expect(createRazorpayOrder).not.toHaveBeenCalled();
+      expect(attachRailOrderId).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a second createOrder call for an already-ordered offer never reaches Razorpay even after a first success", async () => {
+    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+
+    // First call: reservation succeeds, order proceeds normally.
+    reserveLocalOrder.mockResolvedValueOnce(makeReservation());
+    await createOrder("offer-1");
+    expect(createRazorpayOrder).toHaveBeenCalledTimes(1);
+
+    // Second call for the same offer: the reservation this time reflects the
+    // real database state — a row already exists — so it fails, and
+    // createOrder must not call Razorpay a second time.
+    reserveLocalOrder.mockResolvedValueOnce({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+
+    await expect(createOrder("offer-1")).rejects.toThrow(OrderAlreadyExistsError);
+    expect(createRazorpayOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("attaches the rail order id/payload onto the reserved row once Razorpay succeeds", async () => {
+    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+    reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+    createRazorpayOrder.mockResolvedValue({ id: "order_rzp_123" });
+
+    await createOrder("offer-1");
+
+    expect(attachRailOrderId).toHaveBeenCalledWith("local-order-xyz", { id: "order_rzp_123" });
   });
 });
