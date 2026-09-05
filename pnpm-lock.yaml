@@ -419,6 +419,9 @@ importers:
       '@repo/policy':
         specifier: workspace:*
         version: link:../policy
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
     devDependencies:
       '@repo/eslint-config':
         specifier: workspace:*

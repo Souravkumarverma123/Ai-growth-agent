@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@repo/policy": "workspace:*",
-    "@repo/database": "workspace:*"
+    "@repo/database": "workspace:*",
+    "drizzle-orm": "^0.45.2"
   }
 }

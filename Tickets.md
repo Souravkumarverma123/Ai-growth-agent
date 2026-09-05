@@ -686,18 +686,20 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-304 — RailStateSource and polling reconciler
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-301
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-301
 
 **Objective.** Make the rail authoritative, without depending on inbound network.
 
 **Scope.** `RailStateSource` interface — **Seam 3.** Polling implementation. One-directional reconciliation: rail state overwrites local belief, always. Webhooks are **not** on the critical path.
 
 **Acceptance criteria.**
-- The interface has exactly one implementation in the MVP, and the seam is obvious.
-- Reconciliation never writes back to the rail.
-- A test can force captured, failed, and divergent outcomes deterministically.
+- The interface has exactly one implementation in the MVP, and the seam is obvious. ✅ `RailStateSource` (`packages/payments/src/rail-state-source.ts`) has exactly one production implementation, `RazorpayRailStateSource` (`razorpay-rail-state-source.ts`), which polls Razorpay's `GET /orders/{id}/payments` — never a webhook.
+- Reconciliation never writes back to the rail. ✅ `reconcile-order.ts`'s `reconcileOrder` only ever calls `railSource.getOrderState(...)` (a read) — `no-capture-call.test.ts` (which walks every source file in this package) covers this file too.
+- A test can force captured, failed, and divergent outcomes deterministically. ✅ `reconcile-order.test.ts` scripts a fake `RailStateSource` per test to force each of `CAPTURED`/`FAILED`/a divergent (amount-mismatched) `CAPTURED` outcome against a real Postgres (CONTRACTS.md §8's sanctioned seam 3).
 
-**Tests required.** Rail-reported failure overwrites a local belief of success. Polling converges.
+**Tests required.** Rail-reported failure overwrites a local belief of success. ✅ `reconcile-order.test.ts`'s FAILED test. Polling converges. ✅ `poll-pending-orders.test.ts` scripts an order across three poll cycles (`CREATED` → `AUTHORIZED` → `CAPTURED`) and asserts a fourth cycle no longer selects it at all.
+
+**Note (2026-09-06):** deliberately does NOT release a Tier 2 hold on `FAILED`/`CONTRADICTS_LOCAL` — that's TICKET-305's job ("Divergence and failure handling"). Does commit a Tier 2 hold on `CAPTURED`, since that's the natural conclusion of success, not a TICKET-305 concern. The polling driver (`poll-pending-orders.ts`) isolates each order's failure so one bad order never blocks another order's reconciliation in the same cycle — see that file's own module doc for why that's the correct reading of "polling converges," not a weakening of it.
 
 **Affected.** `packages/payments`
 
