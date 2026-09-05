@@ -416,7 +416,7 @@ export const negotiationRouter = router({
         if (!reCheck.eligible) {
           // No row in the frozen state machine models "RA-3 re-check failed
           // mid-negotiation" specifically (every NEGOTIATION_REQUESTED row is
-          // keyed from IDLE/AT_RISK, not OPEN) — recorded as ISSUE-011
+          // keyed from IDLE/AT_RISK, not OPEN) — recorded as ISSUE-012
           // (issue-tracker.md) rather than fabricating a transition row.
           // Fails closed regardless: halts rather than mints.
           await appendAuditEvent(ctx.db, {

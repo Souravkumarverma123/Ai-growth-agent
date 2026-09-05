@@ -69,7 +69,7 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-## ISSUE-011 — Three composition gaps surfaced by TICKET-204's end-to-end wiring
+## ISSUE-012 — Three composition gaps surfaced by TICKET-204's end-to-end wiring
 
 Status: OPEN (partially mitigated in TICKET-204; each sub-issue names the ticket that should actually close it)
 Severity: MEDIUM

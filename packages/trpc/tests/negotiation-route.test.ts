@@ -31,7 +31,7 @@ import type { SkuPolicy } from "@repo/policy/contracts";
  *       `getTestDb()`'s sibling test database. That singleton points at
  *       `DATABASE_URL`, a different physical database from the one this
  *       test's own `ctx.db` (`getTestDb()`) uses, so the real function could
- *       never find a row this test just inserted. Recorded as ISSUE-011 in
+ *       never find a row this test just inserted. Recorded as ISSUE-012 in
  *       `issue-tracker.md` — this is the first ticket that composes
  *       `packages/payments` with the shared test-db harness at all.
  * The mock below inserts its own `orders` row into the SAME test database
