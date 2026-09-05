@@ -7,6 +7,7 @@ import {
   type ReasonCode,
 } from "@repo/policy";
 import type { ConversationTurn, NegotiationModel } from "./model";
+import { composeOfferMessage } from "./message";
 
 /**
  * TICKET-202 — merchant agent orchestration loop (PRD §7, §7.1, §16 RA-2;
@@ -153,6 +154,11 @@ export type RunNegotiationRoundResult =
       readonly status: "OFFER_MINTED";
       readonly intent: NegotiationIntent;
       readonly offer: Offer;
+      /** The buyer-facing text for this offer — always produced by
+       *  `composeOfferMessage` (TICKET-203) from `offer` and
+       *  `intent.messageFrame`, never any other path (CONTRACTS.md §9: no
+       *  free-form claim about this offer reaches the buyer surface). */
+      readonly message: string;
       /** roundIndex advanced by one; tier1Refused carried through unchanged. */
       readonly nextState: RoundState;
     }
@@ -185,7 +191,10 @@ export type RunNegotiationRoundResult =
  * 4. Otherwise passes the intent's `candidateId` to `mintOffer` against the
  *    FULL `candidatesInRound` (never the exposed subset — see that
  *    function's own doc on why).
- * 5. On a successful mint, advances the round (`roundIndex + 1`); on a
+ * 5. On a successful mint, composes the buyer-facing `message` via
+ *    `composeOfferMessage` (TICKET-203) from the minted `offer` and
+ *    `intent.messageFrame` — the ONLY path an `OFFER_MINTED` result's text
+ *    can come from — and advances the round (`roundIndex + 1`); on a
  *    terminal outcome (walk-away, or a coded mint rejection), the state does
  *    not advance — there is no next round to advance into.
  */
@@ -239,6 +248,7 @@ export async function runNegotiationRound(
     status: "OFFER_MINTED",
     intent,
     offer: mintResult.offer,
+    message: composeOfferMessage({ offer: mintResult.offer, messageFrame: intent.messageFrame }),
     nextState: { roundIndex: state.roundIndex + 1, tier1Refused: state.tier1Refused },
   };
 }

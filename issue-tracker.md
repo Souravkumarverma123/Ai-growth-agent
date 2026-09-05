@@ -146,6 +146,76 @@ need to widen this input, which is itself a frozen-contract change
 
 ---
 
+## ISSUE-011 — No agreed buyer-facing money-formatting boundary exists yet, so TICKET-203's composed messages carry raw minor units
+
+Status: NEEDS_SPEC_DECISION
+Severity: LOW
+Found in: TICKET-203
+Date: 2026-09-05
+Violates invariant: none
+
+### Problem
+
+TICKET-203 requires an outbound, buyer-facing message built from the minted
+`Offer`. CONTRACTS.md §3 is explicit that "formatting to rupees happens only
+at the React render boundary. Never in the engine, never in an API
+response" — but no such boundary exists yet anywhere in this repo (no
+`formatMinorUnits`/rupee helper in `packages/policy`, `packages/agent`,
+`apps/web`, or elsewhere; confirmed by grep). `packages/agent` is not "the
+engine" (`packages/policy` is) and is not an API response either, so the
+letter of §3 does not forbid formatting here — but no ticket has yet defined
+where that boundary actually lives for a chat-style buyer message (as
+opposed to a UI prop), so building one now inside this ticket would be
+inventing a shared formatting convention unilaterally.
+
+### Expected
+
+A defined, single place (per §3's own intent: "happens only at ... the
+boundary", singular) that turns `MinorUnits` into a locale-correct rupee
+string for buyer-facing surfaces, reused by every caller that needs one.
+
+### Actual
+
+`packages/agent/message/message-composer.ts` (TICKET-203) renders every
+amount as its raw `MinorUnits` integer plus a `"minor units"` label (e.g.
+`"180000 INR (minor units) in total"`) rather than `"₹1,800.00"`. This is
+the conservative reading of §3 — it introduces no new formatting logic
+anywhere — but it is not realistic buyer copy, and whichever ticket first
+renders these messages to an actual buyer (TICKET-206, currently TODO) will
+need real rupee formatting before this is demo-ready.
+
+### Root Cause
+
+§3 was written before any ticket needed to produce buyer-facing natural-
+language text (as opposed to a numeric API field or a React prop); it
+doesn't say which layer owns formatting for that third case.
+
+### Impact
+
+Cosmetic only for now — every number in a composed message is still exactly
+traceable to the offer row (TICKET-203's actual acceptance criterion), just
+in an unfriendly unit. No invariant is at risk. Blocks a good demo
+experience until resolved.
+
+### Fix
+
+Not fixed here — this needs a lead decision on where the formatting
+boundary lives for buyer chat text (a new shared helper? part of TICKET-206?
+part of the eventual `packages/trpc` buyer surface?), not a unilateral
+choice made inside this ticket's `Affected: packages/agent` scope.
+
+### Regression Test
+
+N/A — no behavior to regress; this is a scope/spec gap, not a bug.
+
+### Related Ticket
+
+TICKET-203, TICKET-206
+
+### Status History
+
+- 2026-09-05: NEEDS_SPEC_DECISION
+
 ## ISSUE-010 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
 
 Status: FIXED

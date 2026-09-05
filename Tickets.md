@@ -516,7 +516,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-203 — Constrained message composition
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-110, TICKET-201
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-110, TICKET-201
 
 **Objective.** Make it structurally impossible for the agent to state a fact the offer does not contain.
 
