@@ -27,6 +27,16 @@ import { signOfferPayload, type SignableOfferFields } from "./signing";
  * that wiring is not this ticket's job (its `Affected` is `packages/policy`
  * only); this type is the seam a future orchestration ticket fills.
  *
+ * `reserveCampaignBudget` already requires its caller to supply the offer id
+ * being reserved for (it writes that id onto the hold row), which means that
+ * id must exist *before* the reservation happens — so for a Tier 2 candidate
+ * `mintOffer` cannot mint its own fresh id the way it does for Tier 1. It
+ * instead reuses the id carried on `CampaignBudgetReservationOutcome`, the
+ * same one the caller passed to `reserveCampaignBudget`, so the signed offer
+ * is always that one specific hold's `offerId` — not a disconnected new one —
+ * and asserts the hold's `amountMinor` against the candidate's
+ * `requiredCampaignSpendMinor` before minting.
+ *
  * Similarly, `now` (mint time) is a plain input rather than read via
  * `new Date()` inside this function, so `mintOffer` stays a pure,
  * deterministic function of its arguments — the same discipline
@@ -86,11 +96,23 @@ import { signOfferPayload, type SignableOfferFields } from "./signing";
  * database-backed caller (`reserveCampaignBudget`,
  * `packages/database/repositories/campaign-holds.ts`) before calling
  * `mintOffer`. Mirrors that function's own `ReserveCampaignBudgetResult`
- * shape (minus the hold row, which this pure function has no use for) rather
- * than redefining an incompatible one.
+ * shape (minus the hold id itself, which this pure function has no use for)
+ * rather than redefining an incompatible one.
+ *
+ * `offerId` and `amountMinor` on the `reserved: true` branch are the same
+ * `offerId`/`amountMinor` the caller passed to `reserveCampaignBudget` — i.e.
+ * exactly what the database hold row now holds. `mintOffer` uses this
+ * `offerId` as the minted offer's own id (rather than generating a fresh,
+ * unrelated one) and asserts `amountMinor` equals the resolved candidate's
+ * `requiredCampaignSpendMinor` before minting. Without that binding, a
+ * caller-supplied `{ reserved: true }` boolean carries no link to *which*
+ * hold or *how much* was actually reserved, so the signed offer's id and
+ * `campaignSpendMinor` would float free of the hold meant to back them — and
+ * the same unbound outcome could be replayed to authorize additional offers
+ * against a single reservation.
  */
 export type CampaignBudgetReservationOutcome =
-  | { reserved: true }
+  | { reserved: true; offerId: string; amountMinor: number }
   | { reserved: false; reasonCode: Extract<ReasonCode, "CAMPAIGN_BUDGET_EXHAUSTED"> };
 
 export type MintOfferInput = {
@@ -251,6 +273,12 @@ export function mintOffer(input: MintOfferInput): MintOfferResult {
     return { minted: false, reasonCode };
   }
 
+  // Tier 2 mints must use the offer id the campaign-budget hold was actually
+  // reserved against — never a freshly generated, unrelated one — so the
+  // signed offer stays bound to that exact hold and exact spend (see the
+  // `CampaignBudgetReservationOutcome` doc).
+  let offerId: string;
+
   if (candidate.tier === 2) {
     // Integrity violation: a Tier 2 mint attempt with no reservation outcome
     // at all means the caller skipped reserving budget before calling
@@ -267,6 +295,21 @@ export function mintOffer(input: MintOfferInput): MintOfferResult {
     if (!campaignBudgetReservation.reserved) {
       return { minted: false, reasonCode: campaignBudgetReservation.reasonCode };
     }
+    // Integrity violation: the hold's reserved amount must exactly match
+    // this candidate's required campaign spend. A mismatch means the caller
+    // reserved against a different candidate/amount than the one it is now
+    // minting — reaching this would sign an offer whose campaignSpendMinor
+    // diverges from the database hold meant to back it.
+    if (campaignBudgetReservation.amountMinor !== candidate.requiredCampaignSpendMinor) {
+      throw new Error(
+        `mintOffer: candidateId "${candidate.candidateId}" requires campaign spend ` +
+          `${candidate.requiredCampaignSpendMinor} but the supplied reservation was for ` +
+          `${campaignBudgetReservation.amountMinor} — refusing to mint an offer that doesn't match its hold`,
+      );
+    }
+    offerId = campaignBudgetReservation.offerId;
+  } else {
+    offerId = randomUUID();
   }
 
   const totalMinor = requireSafeInteger(candidate.totalMinor, "candidate.totalMinor");
@@ -274,8 +317,6 @@ export function mintOffer(input: MintOfferInput): MintOfferResult {
     candidate.requiredCampaignSpendMinor,
     "candidate.requiredCampaignSpendMinor",
   );
-
-  const offerId = randomUUID();
   const expiresAt = new Date(now.getTime() + offerTtlSeconds * 1000);
   const reasonCode: ReasonCode = candidate.tier === 1 ? "TIER1_OFFERED" : "DILUTION_WITHIN_CAPS";
 

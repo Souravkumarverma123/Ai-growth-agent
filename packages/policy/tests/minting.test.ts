@@ -97,7 +97,12 @@ const tier2OverCap = buildCandidate({
 
 const CANDIDATES_IN_ROUND: readonly Candidate[] = [tier1Neutral, tier2AtCap, tier2OverCap];
 
-const RESERVED: CampaignBudgetReservationOutcome = { reserved: true };
+const RESERVED_OFFER_ID = "33333333-3333-4333-8333-333333333333";
+const RESERVED: CampaignBudgetReservationOutcome = {
+  reserved: true,
+  offerId: RESERVED_OFFER_ID,
+  amountMinor: tier2AtCap.requiredCampaignSpendMinor,
+};
 const EXHAUSTED: CampaignBudgetReservationOutcome = {
   reserved: false,
   reasonCode: "CAMPAIGN_BUDGET_EXHAUSTED",
@@ -269,6 +274,27 @@ describe("mintOffer — Tier 2 requires a campaign-budget reservation outcome", 
       buildInput({ candidateId: tier2AtCap.candidateId, campaignBudgetReservation: RESERVED }),
     );
     expect(result.minted).toBe(true);
+  });
+
+  it("binds the minted offer's id to the reservation's offerId, not a freshly generated one", () => {
+    const result = mintOffer(
+      buildInput({ candidateId: tier2AtCap.candidateId, campaignBudgetReservation: RESERVED }),
+    );
+    if (!result.minted) throw new Error("expected a mint");
+    expect(result.offer.offerId).toBe(RESERVED_OFFER_ID);
+  });
+
+  it("throws when the reservation's amountMinor doesn't match the candidate's requiredCampaignSpendMinor", () => {
+    const mismatched: CampaignBudgetReservationOutcome = {
+      reserved: true,
+      offerId: RESERVED_OFFER_ID,
+      amountMinor: tier2AtCap.requiredCampaignSpendMinor + 1,
+    };
+    expect(() =>
+      mintOffer(
+        buildInput({ candidateId: tier2AtCap.candidateId, campaignBudgetReservation: mismatched }),
+      ),
+    ).toThrow(/doesn't match its hold/i);
   });
 
   it("ignores campaignBudgetReservation entirely for a Tier 1 candidate", () => {
