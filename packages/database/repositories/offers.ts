@@ -23,13 +23,28 @@ import type { SelectOffer } from "../models/offer";
  * needed there.
  *
  * The three refusals fold into that one statement's `WHERE` clause:
- *   - `consumed_at IS NULL`               — unreplayable (`OFFER_ALREADY_CONSUMED`)
- *   - `expires_at > $now`                 — perishable (`OFFER_EXPIRED`)
- *   - `basket = $acceptedBasket::jsonb`   — unreassignable (`BASKET_MISMATCH`)
+ *   - `consumed_at IS NULL`  — unreplayable (`OFFER_ALREADY_CONSUMED`)
+ *   - `expires_at > $now`    — perishable (`OFFER_EXPIRED`)
+ *   - currency/lines/commitments match — unreassignable (`BASKET_MISMATCH`)
  *
- * jsonb equality in Postgres compares the parsed structure, not the source
- * text — key order and whitespace never affect it — so this is a safe basket
- * comparison regardless of how the caller's JSON was serialized.
+ * The basket predicate is NOT a single `basket = $acceptedBasket::jsonb`:
+ * jsonb equality compares arrays element-by-element in position order, but
+ * `@repo/policy`'s `evaluateOfferAcceptance` (`basketsMatch`) treats
+ * `commitments` as a set — "a merchant policy's commitment list carries no
+ * meaningful order of its own" — while `lines` order does matter to both
+ * (mirrors the exact bundle the offer was minted for). A single jsonb
+ * equality on the whole basket would silently disagree with that pure
+ * function whenever `commitments` arrives in a different (but
+ * set-equivalent) order: the `UPDATE` would match zero rows even though
+ * `evaluateOfferAcceptance` calls it a match, and the fallback classifier
+ * below would misreport a valid accept as `OFFER_ALREADY_CONSUMED` (it has
+ * no other explanation for "classifier says fine, `UPDATE` still failed").
+ * So `currency` and `lines` are compared as jsonb directly (order-sensitive,
+ * matching `basketsMatch`), while `commitments` is compared via a sorted
+ * `jsonb_agg` on both sides (order-insensitive, same as `basketsMatch`'s own
+ * `.sort()`) — `COALESCE(..., '[]'::jsonb)` because `jsonb_agg` over zero
+ * rows (an empty commitments array) returns SQL `NULL`, not `'[]'`, and
+ * `NULL = NULL` is `NULL`, not `TRUE`.
  *
  * When the `UPDATE` matches zero rows, something in that `WHERE` failed, but
  * the statement alone doesn't say which. This module's *only* other query is
@@ -179,7 +194,8 @@ export async function acceptOffer(
 ): Promise<AcceptOfferResult> {
   const { offerId, acceptedBasket } = params;
   const now = params.now ?? new Date();
-  const acceptedBasketJson = JSON.stringify(acceptedBasket);
+  const acceptedLinesJson = JSON.stringify(acceptedBasket.lines);
+  const acceptedCommitmentsJson = JSON.stringify(acceptedBasket.commitments);
   // `offers.expires_at` / `consumed_at` are `timestamp` (no zone) columns.
   // Drizzle's own column mapping for that type (`pg-core/columns/timestamp.ts`,
   // `mapToDriverValue`) always sends `value.toISOString()` — never a raw
@@ -202,7 +218,15 @@ export async function acceptOffer(
       WHERE id = ${offerId}
         AND consumed_at IS NULL
         AND expires_at > ${nowIso}
-        AND basket = ${acceptedBasketJson}::jsonb
+        AND basket->>'currency' = ${acceptedBasket.currency}
+        AND basket->'lines' = ${acceptedLinesJson}::jsonb
+        AND COALESCE(
+              (SELECT jsonb_agg(c ORDER BY c) FROM jsonb_array_elements_text(basket->'commitments') AS c),
+              '[]'::jsonb
+            ) = COALESCE(
+              (SELECT jsonb_agg(c ORDER BY c) FROM jsonb_array_elements_text(${acceptedCommitmentsJson}::jsonb) AS c),
+              '[]'::jsonb
+            )
       RETURNING ${OFFER_COLUMNS}
     `);
 
