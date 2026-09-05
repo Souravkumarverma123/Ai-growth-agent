@@ -239,6 +239,30 @@ export async function getOrderById(
 }
 
 /**
+ * Same lock discipline as `negotiation-sessions.ts`'s
+ * `getNegotiationSessionForUpdate` — call this (inside a transaction) right
+ * before writing an order this reconciliation is about to update. Two
+ * concurrent `reconcileOrder` calls for the SAME order (e.g. overlapping
+ * poll cycles) otherwise both read a non-terminal `localState`, both proceed
+ * to write, and whichever commits last silently overwrites the other's
+ * result — including a newer `CAPTURED` outcome getting clobbered back to a
+ * stale `AUTHORIZED` one. The second caller blocks here until the first
+ * commits, then re-reads the now-current row, so its own terminal-state
+ * guard sees the real, post-write state instead of a stale snapshot.
+ */
+export async function getOrderByIdForUpdate(
+  database: NodePgDatabase,
+  orderId: string,
+): Promise<SelectOrder | undefined> {
+  const [order] = await database
+    .select()
+    .from(ordersTable)
+    .where(eq(ordersTable.id, orderId))
+    .for("update");
+  return order;
+}
+
+/**
  * TICKET-304 — every order this merchant's polling loop still needs to ask
  * the rail about: attached to a real rail order (nothing to poll before
  * `attachRailOrder` runs), and not yet at a terminal `localState` (once an

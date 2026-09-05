@@ -73,13 +73,28 @@ const STATUS_RANK: Record<string, number> = {
 
 /** The most advanced payment attempt for this order, and the `RailState` it
  *  maps onto — `undefined` when no attempt exists yet (buyer hasn't reached
- *  checkout, or hasn't submitted payment details; not a failure). */
+ *  checkout, or hasn't submitted payment details; not a failure).
+ *
+ *  Every item's status is validated BEFORE ranking, not just the winner's:
+ *  `STATUS_RANK[status] ?? -1` ranks an unrecognized status below even
+ *  `"failed"` (rank 0), so if the list also contains any recognized attempt,
+ *  `reduce` would pick that one as "best" and the unrecognized attempt would
+ *  never reach the `default` throw below — silently ignored instead of
+ *  failing closed. Checking every item up front closes that gap: an
+ *  unrecognized status anywhere in the list is a genuine "we don't know"
+ *  case regardless of what else is present (CONTRACTS.md §6). */
 function mostAdvanced(
   items: readonly RazorpayPaymentAttempt[],
 ): { attempt: RazorpayPaymentAttempt; railState: RailState } | undefined {
   if (items.length === 0) return undefined;
 
-  const best = items.reduce((a, b) => ((STATUS_RANK[b.status] ?? -1) > (STATUS_RANK[a.status] ?? -1) ? b : a));
+  for (const item of items) {
+    if (!(item.status in STATUS_RANK)) {
+      throw new Error(`RazorpayRailStateSource: unrecognized payment status "${item.status}"`);
+    }
+  }
+
+  const best = items.reduce((a, b) => (STATUS_RANK[b.status]! > STATUS_RANK[a.status]! ? b : a));
 
   switch (best.status) {
     case "captured":
@@ -92,35 +107,66 @@ function mostAdvanced(
     case "created":
       return { attempt: best, railState: "CREATED" };
     default:
-      // An unrecognized Razorpay status is a genuine "we don't know" case —
-      // fail closed by throwing rather than guessing a RailState, per
-      // CONTRACTS.md §6 (never silently misclassify at a money boundary).
-      throw new Error(`RazorpayRailStateSource: unrecognized payment status "${best.status}"`);
+      // Unreachable — every status in `items` is already validated against
+      // STATUS_RANK above, and every key it defines is handled by a case
+      // here. Kept as a defensive throw, not a silent fallback, in case the
+      // two ever drift apart.
+      throw new Error(`RazorpayRailStateSource: unhandled recognized status "${best.status}"`);
   }
 }
+
+/** Razorpay's max page size for list endpoints — requesting it up front
+ *  minimizes the number of round trips for an order with many retried
+ *  payment attempts. */
+const PAGE_SIZE = 100;
+/** A buyer genuinely retrying enough times to need more than this many
+ *  pages (2000 attempts) is not a real scenario this MVP needs to serve —
+ *  bounds the loop below so a misbehaving API can't hang this call forever. */
+const MAX_PAGES = 20;
 
 export class RazorpayRailStateSource implements RailStateSource {
   async getOrderState(railOrderId: string): Promise<RailOrderReport> {
     const { keyId, keySecret } = getCredentials();
     const basicAuth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+    const headers = { Authorization: `Basic ${basicAuth}` };
 
-    const response = await fetch(`${RAZORPAY_API_BASE}/orders/${railOrderId}/payments`, {
-      method: "GET",
-      headers: { Authorization: `Basic ${basicAuth}` },
-    });
+    // Razorpay's list endpoints are paginated (`count`/`skip`, max count
+    // 100) — a single request only ever returns the first page, so an order
+    // with more payment attempts than that (a buyer retrying a failed
+    // payment repeatedly) could have its actual capture sitting on a later
+    // page a one-shot fetch would never see, reporting a stale non-captured
+    // state PRD §12 would then treat as authoritative. Reading every page
+    // (there's no separate "total" field to check against — a page shorter
+    // than requested is the only end-of-list signal Razorpay's own list
+    // shape gives) closes that gap.
+    const allItems: RazorpayPaymentAttempt[] = [];
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`RazorpayRailStateSource: Razorpay responded ${response.status}: ${body}`);
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const response = await fetch(
+        `${RAZORPAY_API_BASE}/orders/${railOrderId}/payments?count=${PAGE_SIZE}&skip=${page * PAGE_SIZE}`,
+        { method: "GET", headers },
+      );
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`RazorpayRailStateSource: Razorpay responded ${response.status}: ${body}`);
+      }
+
+      const body = (await response.json()) as RazorpayPaymentsListResponse;
+      allItems.push(...body.items);
+
+      if (body.items.length < PAGE_SIZE) break;
     }
 
-    const body = (await response.json()) as RazorpayPaymentsListResponse;
-    const result = mostAdvanced(body.items);
+    const result = mostAdvanced(allItems);
 
     return {
       railState: result?.railState ?? "CREATED",
       capturedAmountMinor: result?.railState === "CAPTURED" ? result.attempt.amount : undefined,
-      payload: body,
+      // Every attempt across every page fetched above, merged — a human
+      // reconciling this order should see the whole picture, not just
+      // whichever page happened to load last.
+      payload: { entity: "collection", count: allItems.length, items: allItems },
     };
   }
 }

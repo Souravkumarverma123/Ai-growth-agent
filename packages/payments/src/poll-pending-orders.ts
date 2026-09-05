@@ -23,6 +23,15 @@ import type { RailStateSource } from "./rail-state-source";
  * upholding it. Each order's outcome (or thrown error) is reported
  * individually so a caller can alert on the failures without losing the
  * successes.
+ *
+ * Orders reconcile CONCURRENTLY, not one at a time: `reconcileOrder`'s own
+ * network call to the rail happens with no open transaction (see that
+ * file's own doc), so a slow or hung rail request for one order only holds
+ * up that one order's own short-lived DB work, never blocks every
+ * later order in the batch behind it — the same "one bad apple can't stop
+ * the rest" property this module already applies to failures also has to
+ * apply to latency, or a single hung request could stall convergence for
+ * every other, healthy order in the same cycle.
  */
 export type PollOutcome =
   | { orderId: string; ok: true; outcome: ReconcileOutcome }
@@ -34,14 +43,14 @@ export async function pollPendingOrders(
 ): Promise<PollOutcome[]> {
   const orders = await listOrdersAwaitingReconciliation(database);
 
-  const results: PollOutcome[] = [];
-  for (const order of orders) {
-    try {
-      const outcome = await reconcileOrder(database, railSource, order.id);
-      results.push({ orderId: order.id, ok: true, outcome });
-    } catch (error) {
-      results.push({ orderId: order.id, ok: false, error });
-    }
-  }
-  return results;
+  const settled = await Promise.allSettled(
+    orders.map((order) => reconcileOrder(database, railSource, order.id)),
+  );
+
+  return settled.map((result, index) => {
+    const orderId = orders[index]!.id;
+    return result.status === "fulfilled"
+      ? { orderId, ok: true, outcome: result.value }
+      : { orderId, ok: false, error: result.reason };
+  });
 }

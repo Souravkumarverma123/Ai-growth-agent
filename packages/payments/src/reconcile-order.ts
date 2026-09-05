@@ -15,7 +15,7 @@ import {
   getNegotiationSessionForUpdate,
   updateNegotiationSession,
 } from "@repo/database/repositories/negotiation-sessions";
-import { getOrderById, recordRailReport } from "@repo/database/repositories/orders";
+import { getOrderById, getOrderByIdForUpdate, recordRailReport } from "@repo/database/repositories/orders";
 import { offersTable } from "@repo/database/models/offer";
 
 import type { RailStateSource } from "./rail-state-source";
@@ -74,26 +74,49 @@ export async function reconcileOrder(
   railSource: RailStateSource,
   orderId: string,
 ): Promise<ReconcileOutcome> {
+  // Cheap pre-check with NO open transaction: skips the network call
+  // entirely for an order that's already terminal, and — the load-bearing
+  // reason — keeps a pooled DB connection from ever being held open for the
+  // Razorpay round-trip below. A stale read here is harmless: the real
+  // not-already-reconciled guard is the locked re-check inside the
+  // transaction further down, which this pre-check is only an optimization
+  // ahead of.
+  const precheck = await getOrderById(database, orderId);
+  if (!precheck) {
+    throw new Error(`reconcileOrder: no order found for id "${orderId}"`);
+  }
+  if (!precheck.railOrderId) {
+    throw new Error(`reconcileOrder: order "${orderId}" has no rail order attached yet — nothing to poll`);
+  }
+  if (precheck.localState === "CAPTURED" || precheck.localState === "FAILED") {
+    return { status: "ALREADY_RECONCILED" };
+  }
+
+  const report = await railSource.getOrderState(precheck.railOrderId);
+
   return database.transaction(async (tx): Promise<ReconcileOutcome> => {
-    const order = await getOrderById(tx, orderId);
+    // FOR UPDATE, and re-checked fresh rather than trusting `precheck`:
+    // serializes against a concurrent reconciliation of the SAME order (two
+    // overlapping poll cycles, say). Without this, both could read a
+    // non-terminal `localState` before either writes, and whichever commits
+    // last would silently overwrite the other's result — including a newer
+    // CAPTURED outcome getting clobbered back to a stale AUTHORIZED one by a
+    // slower, older report. See `getOrderByIdForUpdate`'s own doc.
+    const order = await getOrderByIdForUpdate(tx, orderId);
     if (!order) {
       throw new Error(`reconcileOrder: no order found for id "${orderId}"`);
-    }
-    if (!order.railOrderId) {
-      throw new Error(`reconcileOrder: order "${orderId}" has no rail order attached yet — nothing to poll`);
     }
 
     // Idempotent: a poll cycle can and will see the same order more than
     // once before its `railOrderId` is even attached, or after it has
-    // already been resolved by an earlier cycle. Once `localState` is
+    // already been resolved by an earlier cycle (here, or by the
+    // concurrent caller this lock just waited on). Once `localState` is
     // terminal, PRD §12's reconciliation has already run its course for
     // this order — re-running it would re-append a ledger event for a
     // transition the session already made.
     if (order.localState === "CAPTURED" || order.localState === "FAILED") {
       return { status: "ALREADY_RECONCILED" };
     }
-
-    const report = await railSource.getOrderState(order.railOrderId);
 
     if (report.railState === "CREATED" || report.railState === "AUTHORIZED") {
       // Not yet terminal — nothing for the ledger or the session to do.
