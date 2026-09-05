@@ -128,8 +128,20 @@ describe("B3 — no order-creation function accepts an amount parameter", () => 
     expect(messagesFor(result, "no-restricted-syntax").length).toBeGreaterThan(0);
   });
 
+  it("fires on a typed, destructured input object carrying an amount property", async () => {
+    const result = await lintFixture(overrideConfig, "order-creation-violation-destructured.ts");
+    const hits = messagesFor(result, "no-restricted-syntax");
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.some((m) => m.message.includes("B3"))).toBe(true);
+  });
+
   it("does not flag createOrder(offerId) taking a single id argument", async () => {
     const result = await lintFixture(overrideConfig, "order-creation-ok.ts");
+    expect(messagesFor(result, "no-restricted-syntax")).toHaveLength(0);
+  });
+
+  it("does not flag a destructured input object with no amount property", async () => {
+    const result = await lintFixture(overrideConfig, "order-creation-ok-destructured.ts");
     expect(messagesFor(result, "no-restricted-syntax")).toHaveLength(0);
   });
 

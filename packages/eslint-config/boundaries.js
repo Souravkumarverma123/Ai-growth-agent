@@ -154,12 +154,13 @@ export const paymentsBoundaries = [
  *    /create.*order/i (e.g. createOrder, createRazorpayOrder) — not on every
  *    function that happens to take an amount-shaped parameter.
  *  - Only fires when a PARAMETER's name matches /amount/i or /totalminor/i
- *    (amountMinor, totalAmountMinor, totalMinor, orderAmount, ...).
- *  - Matches a plain or default-valued `Identifier` parameter. A destructured
- *    parameter (`{ amountMinor }: CreateOrderInput`) is NOT currently caught
- *    — documented rather than silently accepted. If packages/payments ends
- *    up destructuring its input object, tighten this rule instead of relying
- *    on review to catch the gap.
+ *    (amountMinor, totalAmountMinor, totalMinor, orderAmount, ...). For a
+ *    destructured parameter, this checks each destructured property's name
+ *    (`{ amountMinor }`), not the parameter itself.
+ *  - Matches a plain or default-valued `Identifier` parameter
+ *    (`amountMinor`, `amountMinor = 0`) as well as a destructured object
+ *    parameter, typed or not, with or without a default
+ *    (`{ amountMinor }: CreateOrderInput`, `{ amountMinor } = {}`).
  *
  * @type {import("eslint").Linter.Config[]}
  */
@@ -182,13 +183,19 @@ const orderCreationSelectors = [
   ...orderCreationFunctionShapes.flatMap((fn) => [
     `${fn} > Identifier.params[name=${AMOUNT_PARAM_NAME}]`,
     `${fn} > AssignmentPattern.params[left.name=${AMOUNT_PARAM_NAME}]`,
+    `${fn} > ObjectPattern.params > Property[key.name=${AMOUNT_PARAM_NAME}]`,
+    `${fn} > AssignmentPattern.params > ObjectPattern.left > Property[key.name=${AMOUNT_PARAM_NAME}]`,
   ]),
   // class OrderService { createOrder(offerId, amountMinor) {} }
   `MethodDefinition[key.name=${ORDER_CREATE_FN_NAME}] Identifier.params[name=${AMOUNT_PARAM_NAME}]`,
   `MethodDefinition[key.name=${ORDER_CREATE_FN_NAME}] AssignmentPattern.params[left.name=${AMOUNT_PARAM_NAME}]`,
+  `MethodDefinition[key.name=${ORDER_CREATE_FN_NAME}] ObjectPattern.params Property[key.name=${AMOUNT_PARAM_NAME}]`,
+  `MethodDefinition[key.name=${ORDER_CREATE_FN_NAME}] AssignmentPattern.params ObjectPattern.left Property[key.name=${AMOUNT_PARAM_NAME}]`,
   // const service = { createOrder(offerId, amountMinor) {} }
   `Property[key.name=${ORDER_CREATE_FN_NAME}][value.type="FunctionExpression"] Identifier.params[name=${AMOUNT_PARAM_NAME}]`,
   `Property[key.name=${ORDER_CREATE_FN_NAME}][value.type="FunctionExpression"] AssignmentPattern.params[left.name=${AMOUNT_PARAM_NAME}]`,
+  `Property[key.name=${ORDER_CREATE_FN_NAME}][value.type="FunctionExpression"] ObjectPattern.params Property[key.name=${AMOUNT_PARAM_NAME}]`,
+  `Property[key.name=${ORDER_CREATE_FN_NAME}][value.type="FunctionExpression"] AssignmentPattern.params ObjectPattern.left Property[key.name=${AMOUNT_PARAM_NAME}]`,
 ];
 
 /** @type {import("eslint").Linter.Config[]} */
