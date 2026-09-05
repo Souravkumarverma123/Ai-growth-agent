@@ -416,7 +416,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-110 — Offer minting and signature
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-104, TICKET-107
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-104, TICKET-107
 
 **Objective.** Make the engine the only thing in the system that can mint an offer.
 
