@@ -409,6 +409,34 @@ describe("TICKET-402 — a resolver fails loudly instead of guessing", () => {
     ).toThrow();
   });
 
+  it("resolveOfferMintedTransition throws for a malformed tier 1 candidate marked infeasible", () => {
+    expect(() =>
+      resolveOfferMintedTransition(
+        makeTieredCandidate({ tier: 1, feasible: false, infeasibleReason: "CAMPAIGN_BUDGET_EXHAUSTED" }),
+        false,
+        false,
+      ),
+    ).toThrow();
+  });
+
+  it("resolveOfferMintedTransition throws for a malformed tier 1 candidate carrying a stray infeasibleReason", () => {
+    expect(() =>
+      resolveOfferMintedTransition(
+        makeTieredCandidate({ tier: 1, feasible: true, infeasibleReason: "CAMPAIGN_BUDGET_EXHAUSTED" }),
+        false,
+        false,
+      ),
+    ).toThrow();
+  });
+
+  it("resolveMintAttemptedTransition throws for a malformed tier 1 candidate marked infeasible", () => {
+    expect(() =>
+      resolveMintAttemptedTransition(
+        makeTieredCandidate({ tier: 1, feasible: false, infeasibleReason: "CAMPAIGN_BUDGET_EXHAUSTED" }),
+      ),
+    ).toThrow();
+  });
+
   it("resolveRoundIncrementedTransition throws when the round has not exceeded maxRounds", () => {
     expect(() => resolveRoundIncrementedTransition(3, 3)).toThrow();
   });

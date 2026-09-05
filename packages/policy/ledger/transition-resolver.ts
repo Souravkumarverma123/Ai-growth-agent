@@ -188,6 +188,14 @@ export function resolveCandidatesGeneratedTransition(result: TierAssignmentResul
  * supplies. Throws rather than guessing if a tier 2 mint is attempted before
  * its guards are satisfied — minting an unselectable candidate is a caller
  * bug this function must not paper over.
+ *
+ * `tier`, `feasible`, and `infeasibleReason` are independently typed fields
+ * on `TieredCandidate` (`contracts/negotiation.ts`'s `candidateSchema`) —
+ * nothing at the type level ties them together, only `markCandidate`'s
+ * construction discipline (`generation/tiering.ts`) does. So a tier 1
+ * candidate is re-checked against that invariant here rather than trusted:
+ * one that arrived with `feasible: false` is malformed and must not be
+ * classified as a successful `TIER1_OFFERED` mint.
  */
 export function resolveOfferMintedTransition(
   candidate: TieredCandidate,
@@ -195,6 +203,13 @@ export function resolveOfferMintedTransition(
   sessionStillEligible: boolean,
 ): StateTransition {
   if (candidate.tier === 1) {
+    if (!candidate.feasible || candidate.infeasibleReason !== null) {
+      throw new Error(
+        "resolveOfferMintedTransition: candidate is tier 1 but feasible/infeasibleReason contradict " +
+          "that — a tier 1 candidate is always feasible by construction (generation/tiering.ts), so this " +
+          "candidate is malformed",
+      );
+    }
     return lookupTransition("OPEN", "OFFER_MINTED", "TIER1_OFFERED");
   }
   if (!candidate.feasible) {
@@ -225,12 +240,24 @@ export function resolveOfferMintedTransition(
  * code (`markCandidate` sets it to whichever cap failed first), so this
  * function's whole job is validating that the candidate is actually in this
  * family before trusting that field, not re-deriving the cap arithmetic.
+ *
+ * Also requires `candidate.tier === 2`: a tier 1 candidate is always
+ * feasible by construction (`generation/tiering.ts`), so `tier === 1` with
+ * `feasible: false` is a malformed candidate, not a MINT_ATTEMPTED outcome —
+ * `tier`, `feasible`, and `infeasibleReason` are independently typed fields
+ * on `TieredCandidate`, so nothing else rules that combination out.
  */
 export function resolveMintAttemptedTransition(candidate: TieredCandidate): StateTransition {
   if (candidate.feasible) {
     throw new Error(
       "resolveMintAttemptedTransition: candidate is feasible — mint it via " +
         "resolveOfferMintedTransition instead of treating it as a failed mint attempt",
+    );
+  }
+  if (candidate.tier !== 2) {
+    throw new Error(
+      "resolveMintAttemptedTransition: candidate is tier 1 but infeasible — a tier 1 candidate is " +
+        "always feasible by construction (generation/tiering.ts), so this candidate is malformed",
     );
   }
   const { infeasibleReason } = candidate;
