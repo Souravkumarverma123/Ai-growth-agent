@@ -80,7 +80,9 @@ vi.mock("@repo/payments", async (importOriginal) => {
 // readable top-to-bottom).
 const { serverRouter } = await import("../server");
 
-async function insertMerchantWithPolicyAndSku(overrides: { maxRounds?: number } = {}): Promise<{
+async function insertMerchantWithPolicyAndSku(
+  overrides: { maxRounds?: number; autonomousPaymentExecution?: boolean } = {},
+): Promise<{
   merchantId: string;
   skuPolicy: SkuPolicy;
 }> {
@@ -100,7 +102,7 @@ async function insertMerchantWithPolicyAndSku(overrides: { maxRounds?: number } 
     maxRounds: overrides.maxRounds ?? 3,
     concessionCurve: [0.4, 0.7, 1.0],
     offerTtlSeconds: 600,
-    autonomousPaymentExecution: false,
+    autonomousPaymentExecution: overrides.autonomousPaymentExecution ?? false,
   });
 
   const [sku] = await db
@@ -293,6 +295,47 @@ describe("TICKET-204 — negotiation router procedures", () => {
       expect(reasonCodes).toContain("NEGOTIATION_OPENED");
       expect(reasonCodes).toContain("OFFER_ACCEPTED");
       expect(reasonCodes).toContain("ORDER_CREATED");
+    });
+
+    // TICKET-306 — autonomous-payment gate. The "true" branch must exist and
+    // fail closed, not be an assumption nobody flips the flag to check.
+    it("acceptOffer fails closed with NOT_IMPLEMENTED when autonomousPaymentExecution is true, never a silent success or a real charge", async () => {
+      const { merchantId, skuPolicy } = await insertMerchantWithPolicyAndSku({ autonomousPaymentExecution: true });
+      const sessionId = await insertSession({ merchantId, skuPolicy, state: "AT_RISK" });
+      const db = await getTestDb();
+      const caller = serverRouter.createCaller({ db });
+
+      await caller.negotiation.openNegotiation({ sessionId, buyerAgentId: "buyer-agent-1" });
+      const proposed = await caller.negotiation.propose({ negotiationId: sessionId, message: "hello" });
+      expect(proposed.offer).not.toBeNull();
+      const offerId = proposed.offer!.offerId;
+
+      await expect(
+        caller.negotiation.acceptOffer({ negotiationId: sessionId, offerId }),
+      ).rejects.toMatchObject({ code: "NOT_IMPLEMENTED" });
+
+      // Audited with its reason code — the refusal is a real, findable event,
+      // not a silently swallowed one.
+      const events = await db.select().from(auditEventsTable).where(eq(auditEventsTable.sessionId, sessionId));
+      expect(events.map((e) => e.reasonCode)).toContain("AUTONOMOUS_PAYMENT_NOT_AUTHORIZED");
+
+      // Checked BEFORE any write (this session's own earlier fix for the
+      // stranding bug): the offer is untouched and the session never
+      // advanced to ACCEPTED, so a merchant who later disables the flag can
+      // still let the buyer accept this same, still-valid offer.
+      const [offer] = await db.select().from(offersTable).where(eq(offersTable.id, offerId));
+      expect(offer!.status).toBe("PENDING");
+      const [session] = await db
+        .select()
+        .from(negotiationSessionsTable)
+        .where(eq(negotiationSessionsTable.id, sessionId));
+      expect(session!.state).toBe("OFFER_PENDING");
+
+      // No capture/charge call is even reachable to get to: createRazorpayOrder
+      // (the only network call in packages/payments) is mocked in this file
+      // and was never invoked for this offer.
+      const { createOrder } = await import("@repo/payments");
+      expect(createOrder).not.toHaveBeenCalled();
     });
 
     it("respondToOffer(DECLINE_AND_CONTINUE) on a Tier 1 offer unlocks Tier 2 and returns to OPEN", async () => {

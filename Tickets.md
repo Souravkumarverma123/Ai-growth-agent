@@ -662,17 +662,19 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-303 — Payment handle and buyer authorization
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-301
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-301
 
 **Objective.** Return a handle the human buyer authorizes. Nothing more.
 
 **Scope.** Order creation returns a payment handle to the buyer surface. The buyer authorizes in Razorpay test mode. No agent-initiated capture at any point.
 
 **Acceptance criteria.**
-- The only reachable path is `createOrder(offerId) → handle → buyer authorizes`.
-- No agent code path can trigger a charge.
+- The only reachable path is `createOrder(offerId) → handle → buyer authorizes`. ✅ `acceptOffer` (TICKET-204, `packages/trpc/server/routes/negotiation/route.ts`) calls `createOrder(offer.id)` and returns `paymentHandle: { orderId, railOrderId, amountMinor, currency }` only — no capture-shaped field exists on the response (asserted directly, `negotiation-route.test.ts`'s happy-path test).
+- No agent code path can trigger a charge. ✅ Structural, not just tested: `packages/agent`'s own eslint config (`agentBoundaries`, CONTRACTS.md B2) forbids importing `@repo/payments` at all — a reviewer can verify this in ten seconds, and a lint test already proves the rule fires on a deliberately-added forbidden import (TICKET-006).
 
-**Tests required.** No capture path is reachable from the agent package.
+**Tests required.** No capture path is reachable from the agent package. ✅ `packages/payments/tests/no-capture-call.test.ts` asserts zero capture/charge-shaped calls anywhere in the package; `packages/agent`'s boundary lint rule makes the package structurally unable to reach `packages/payments` in the first place.
+
+**Note (2026-09-06):** the `apps/web` half of this ticket's original scope (a UI page where the buyer clicks through to authorize) was never built here — that UI surface is TICKET-506's ("Minimal buyer surface") job, which already lists TICKET-303 as a dependency. Closing this ticket on its own testable acceptance criteria (the API-level handle contract and the no-charge guarantee), not on a UI that belongs to a different ticket.
 
 **Affected.** `packages/payments`, `apps/web`
 
@@ -730,20 +732,20 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-306 — Autonomous-payment gate
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-303
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-303
 
 **Objective.** Make the flag a real enforced boundary with a visible extension seam.
 
 **Scope.** The terminal action after acceptance checks `autonomous_payment_execution`. `false` → order creation path only. `true` → **exists in code and fails closed** with `NOT_IMPLEMENTED`, emitting `AUTONOMOUS_PAYMENT_NOT_AUTHORIZED`. It must not silently no-op.
 
 **Acceptance criteria.**
-- The `true` branch exists and throws — verified by a test that flips the flag.
-- The refusal is audited with its reason code.
-- With `false`, no other terminal path is reachable.
+- The `true` branch exists and throws — verified by a test that flips the flag. ✅
+- The refusal is audited with its reason code. ✅ — but only after fixing ISSUE-013 (`issue-tracker.md`): the audit write originally lived inside the same database transaction as the throw, so the throw rolled its own audit event back. Fixed by returning a `blocked` result from the transaction and throwing only after it commits.
+- With `false`, no other terminal path is reachable. ✅ (unchanged, pre-existing behavior.)
 
-**Tests required.** Flag flipped to `true` produces a thrown error and an audit event, never a silent success and never an actual charge.
+**Tests required.** Flag flipped to `true` produces a thrown error and an audit event, never a silent success and never an actual charge. ✅ `negotiation-route.test.ts` — "acceptOffer fails closed with NOT_IMPLEMENTED when autonomousPaymentExecution is true..." — also asserts the offer stays unconsumed and the session stays in `OFFER_PENDING`, so a merchant who later disables the flag can still let the buyer accept the same offer (offers are single-use; consuming one on a doomed attempt would strand the buyer).
 
-**Affected.** `packages/payments`, `packages/policy`
+**Affected.** `packages/payments`, `packages/policy`, `packages/trpc`
 
 **Parallelization.** Independent after TICKET-303.
 
