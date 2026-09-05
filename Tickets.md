@@ -539,7 +539,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-204 — Negotiation protocol procedures
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-006, TICKET-202
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-006, TICKET-202
 
 **Objective.** Implement the buyer-facing tRPC procedures behind the frozen signatures.
 

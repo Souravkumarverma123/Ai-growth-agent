@@ -1,4 +1,4 @@
-import { initTRPC, TRPCError } from "@trpc/server";
+import { initTRPC } from "@trpc/server";
 import { OpenApiMeta } from "trpc-to-openapi";
 
 import { createContext } from "./context";

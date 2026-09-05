@@ -69,6 +69,83 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-011 — Three composition gaps surfaced by TICKET-204's end-to-end wiring
+
+Status: OPEN (partially mitigated in TICKET-204; each sub-issue names the ticket that should actually close it)
+Severity: MEDIUM
+Found in: TICKET-204 (negotiation protocol procedures — the first ticket to
+actually drive `packages/policy` + `packages/agent` + `packages/database` +
+`packages/payments` together, end to end, against a real request)
+Violates invariant: none directly — each sub-issue is a genuine gap in how
+two already-DONE tickets compose, not a violation of a stated invariant on
+its own. (11a fails closed correctly today; it is recorded because the
+*specific* ledger entry it writes doesn't correspond to a row in the frozen
+state machine, not because money or policy integrity is at risk.)
+
+### 11a. RA-3's mid-negotiation eligibility re-check has no modeled ledger transition for its failure path
+
+PRD §16 RA-3 requires eligibility to be re-checked once before a Tier 2 mint
+(`packages/policy/eligibility/eligibility.ts`'s own module doc says the same).
+TICKET-204 implements that re-check in `propose` (`packages/trpc/server/
+routes/negotiation/route.ts`) so a merchant flipping the kill switch
+mid-negotiation (RA-1) is honored before a Tier 2 offer is minted. When the
+re-check fails, the session is halted (fails closed — no mint occurs), but
+`contracts/state-machine.ts`'s frozen `TRANSITIONS` table has no row for
+"eligibility re-check failed while the session is OPEN": every
+`NEGOTIATION_REQUESTED` row is keyed `from: "IDLE"` or `from: "AT_RISK"`,
+never `from: "OPEN"`. TICKET-204's ledger write for this path uses
+`fromState: "OPEN"` directly (accurate) with the re-check's own reason code,
+bypassing `resolveNegotiationRequestedTransition`'s `lookupTransition` (which
+would throw, since `(OPEN, NEGOTIATION_REQUESTED, <code>)` genuinely isn't in
+the table) — so the write is honest about the actual state, but doesn't
+correspond to any row a reviewer can point to in the frozen table. Recording
+here per CONTRACTS.md §1's instruction ("if a ticket seems to require a
+change here, that is a signal to stop... record it") rather than adding a
+transition row unilaterally. **NEEDS_SPEC_DECISION**: either add an explicit
+`OPEN --NEGOTIATION_REQUESTED--> HALTED` family of rows for the RA-3 re-check
+outcomes, or bless the current behavior in `PRD.md`/`CONTRACTS.md` as
+intentionally outside the table (the way `FLOOR_BREACH`'s `from: "*"` row is
+an explicitly-documented exception).
+
+### 11b. `packages/payments` cannot compose with the shared test-db harness without mocking
+
+`getOfferById`/`createOrder` (`packages/payments/src/offer-repository.ts`,
+`create-order.ts`) import `@repo/database`'s exported singleton `db` directly
+— unlike every repository function elsewhere in this codebase, which is
+generic over `NodePgDatabase` specifically so it can run against
+`getTestDb()`'s sibling test database (CONTRACTS.md §8's own harness note).
+That singleton always points at `DATABASE_URL`, a different physical
+database from whatever `getTestDb()` derives from it. TICKET-301/302's own
+tests never noticed this because they mock every one of `createOrder`'s
+dependencies for a different reason (no real Razorpay network call in
+tests). TICKET-204's `acceptOffer` procedure is the first caller that needs
+`createOrder` to see a row a *different* package's test just inserted via
+`ctx.db`, and it cannot — worked around in
+`packages/trpc/tests/negotiation-route.test.ts` by mocking `@repo/payments`
+entirely (which is also required anyway, to avoid a real Razorpay HTTP call).
+Affects any future ticket that composes `packages/payments` with the shared
+test-db harness (TICKET-303, TICKET-304, TICKET-305, TICKET-306) — worth
+considering whether `getOfferById`/`createOrder` should take an optional
+`NodePgDatabase` parameter, matching every other repository in this repo.
+
+### 11c. `acceptOffer`'s frozen input schema carries no separate "basket the buyer is accepting" field
+
+TICKET-006's frozen `acceptOffer` input is `{ negotiationId, offerId }` only
+— no basket. TICKET-111's `BASKET_MISMATCH` refusal
+(`packages/policy/acceptance/acceptance.ts`,
+`packages/database/repositories/offers.ts`) compares the offer's minted
+basket against "the basket the buyer is attempting to accept right now,"
+which implies a second, independently-supplied basket. Through this specific
+transport, TICKET-204 has no such second value to supply and passes the
+offer's own basket back to itself, so `BASKET_MISMATCH` is structurally
+unreachable via `acceptOffer` today (TTL and single-use are still fully
+enforced). Not a defect in TICKET-111 or TICKET-006 individually — recording
+because a future ticket revisiting cart-drift detection at accept time will
+need to widen this input, which is itself a frozen-contract change
+(CONTRACTS.md §1) requiring lead sign-off, not a routine addition.
+
+---
+
 ## ISSUE-010 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
 
 Status: FIXED
