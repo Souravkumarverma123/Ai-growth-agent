@@ -76,7 +76,7 @@ export const merchantRouter = router({
       };
     }),
 
-  /**
+  /*
    * Approving policy is the delegation moment — the only point at which a human
    * grants the agent authority. It increments policyVersion, which is then
    * pinned to every session opened afterwards.
