@@ -204,7 +204,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-101 — Eligibility engine
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 0
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 0
 
 **Objective.** Decide, from merchant-controlled state alone, whether a session may negotiate.
 
@@ -467,7 +467,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-201 — NegotiationModel abstraction and structured intent
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 0
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 0
 
 **Objective.** Define the model's entire output surface, containing no numbers.
 
