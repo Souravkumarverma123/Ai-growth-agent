@@ -73,6 +73,24 @@ function requireSafeInteger(value: number, description: string): MinorUnits {
 }
 
 /**
+ * `basketLineSchema` already constrains `quantity` to `z.number().int().positive()`
+ * at the parse boundary, but this module takes a plain `Basket`-typed value
+ * with no runtime guarantee behind that type — nothing stops a caller from
+ * constructing one directly. A non-positive quantity would flip the sign of
+ * `headroomMinor * quantity` (line 121) instead of raising, silently turning
+ * a below-floor line into positive contribution. Checked here, at first use,
+ * for the same fails-closed reason every other operand in this file is
+ * re-checked rather than trusted from the contract alone.
+ */
+function requirePositiveInteger(value: number, description: string): number {
+  requireSafeInteger(value, description);
+  if (value <= 0) {
+    throw new Error(`computeBasketContribution: ${description} must be positive (${value})`);
+  }
+  return value;
+}
+
+/**
  * The contribution of a basket: headroom above floor on every line, plus the
  * value of every merchant-valued commitment attached to it.
  *
@@ -111,7 +129,7 @@ export function computeBasketContribution(
     }
     requireSafeInteger(line.unitPriceMinor, `unitPriceMinor for skuId "${line.skuId}"`);
     requireSafeInteger(skuPolicy.floorPriceMinor, `floorPriceMinor for skuId "${line.skuId}"`);
-    requireSafeInteger(line.quantity, `quantity for skuId "${line.skuId}"`);
+    requirePositiveInteger(line.quantity, `quantity for skuId "${line.skuId}"`);
 
     const headroomMinor = requireSafeInteger(
       line.unitPriceMinor - skuPolicy.floorPriceMinor,

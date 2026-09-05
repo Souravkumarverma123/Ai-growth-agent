@@ -18,7 +18,7 @@ import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } fr
  * `./razorpay-client.ts`'s module doc. `createOrder` only ever creates a
  * Razorpay order; a human buyer authorizes it from there (TICKET-303).
  *
- * TICKET-302 — offer-to-order uniqueness (formerly ISSUE-010, now FIXED).
+ * TICKET-302 — offer-to-order uniqueness (ISSUE-009, now FIXED).
  * This function reserves a local `orders` row for `offerId` (`./order-repository.ts`
  * -> `@repo/database/repositories/orders`, enforced by the unique constraint
  * on `orders.offer_id`) BEFORE calling out to Razorpay, and only proceeds to

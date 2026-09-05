@@ -69,7 +69,7 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-## ISSUE-009 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
+## ISSUE-010 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
 
 Status: FIXED
 Severity: HIGH
@@ -190,7 +190,7 @@ TICKET-111 (found and fixed here)
 
 ---
 
-## ISSUE-010 — `createOrder` POSTs to Razorpay without reserving a local order first, so concurrent/retried calls can mint two orders for one offer
+## ISSUE-009 — `createOrder` POSTs to Razorpay without reserving a local order first, so concurrent/retried calls can mint two orders for one offer
 
 Status: FIXED
 Severity: HIGH
