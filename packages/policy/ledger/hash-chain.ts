@@ -113,7 +113,7 @@ export function verifyChain(events: readonly ChainEvent[]): ChainVerificationRes
     return { valid: true, eventCount: 0 };
   }
 
-  const genesisSequence = events[0]!.sequence;
+  const genesisSequence = 0;
 
   for (let index = 0; index < events.length; index++) {
     const event = events[index]!;
