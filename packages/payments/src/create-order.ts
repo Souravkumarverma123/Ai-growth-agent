@@ -1,7 +1,11 @@
 import type { SelectOffer } from "@repo/database/models/offer";
 
 import { getOfferById } from "./offer-repository";
-import { attachRailOrderId, reserveLocalOrder } from "./order-repository";
+import {
+  attachRailOrderId,
+  cancelUnattachedOrder,
+  reserveLocalOrder,
+} from "./order-repository";
 import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } from "./razorpay-client";
 
 /**
@@ -47,24 +51,25 @@ export async function createOrder(offerId: string): Promise<RazorpayOrder> {
   // Reserve-before-POST: the local row must exist, uniquely, before we ever
   // talk to Razorpay. If it doesn't (an order already exists for this
   // offer), we stop right here — no second POST, no raw DB error escaping.
-  const reservation = await reserveLocalOrder({
-    offerId: offer.id,
-    amountMinor: offer.totalMinor,
-    currency: offer.currency,
-  });
+  const reservation = await reserveLocalOrder({ offerId: offer.id });
 
   if (!reservation.reserved) {
     throw new OrderAlreadyExistsError(offerId);
   }
 
-  const request = buildRazorpayOrderRequest(offer);
-  const razorpayOrder = await createRazorpayOrder(request);
-
-  // Record what the reservation actually produced, for human reconciliation
-  // and for TICKET-304's polling reconciler to have a rail order id to poll.
-  await attachRailOrderId(reservation.order.id, razorpayOrder);
-
-  return razorpayOrder;
+  try {
+    const request = buildRazorpayOrderRequest(offer);
+    const razorpayOrder = await createRazorpayOrder(request);
+    // Record what the reservation actually produced, for human reconciliation
+    // and for TICKET-304's polling reconciler to have a rail order id to poll.
+    await attachRailOrderId(reservation.order.id, razorpayOrder);
+    return razorpayOrder;
+  } catch (error) {
+    // Razorpay or attach failed — free the unattached reservation so a retry
+    // can create the missing rail order instead of hitting OrderAlreadyExistsError.
+    await cancelUnattachedOrder(reservation.order.id).catch(() => {});
+    throw error;
+  }
 }
 
 /**

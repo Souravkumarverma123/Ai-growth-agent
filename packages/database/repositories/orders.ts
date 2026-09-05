@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import { ordersTable, type SelectOrder } from "../models/payment";
@@ -45,9 +45,6 @@ const ORDERS_OFFER_ID_UNIQUE_CONSTRAINT = "orders_offer_id_unique";
 
 export type ReserveOrderParams = {
   offerId: string;
-  /** Copied onto the order row for human reconciliation — never re-derived later. */
-  amountMinor: number;
-  currency: string;
 };
 
 export type ReserveOrderResult =
@@ -82,6 +79,13 @@ function isUniqueViolationOn(error: unknown, constraint: string): boolean {
  * "ORDER_ALREADY_EXISTS" }`, never a thrown raw Postgres error and never a
  * second row.
  *
+ * Amount and currency are **derived from the offer row itself** via an
+ * atomic `INSERT ... SELECT` — the caller never supplies money, so a stored
+ * order can never disagree with its offer (fixes the API-mismatch where
+ * `amountMinor`/`currency` were caller-supplied). If the offer does not
+ * exist the `SELECT` produces zero rows and the insert returns nothing —
+ * surfaced as a thrown error (fail closed, CONTRACTS.md §6).
+ *
  * Callers should call this BEFORE making any external payment-rail call
  * (`createOrder`, `packages/payments/src/create-order.ts`) and only proceed
  * to the rail if `reserved` is `true` — that ordering is what makes "one
@@ -92,19 +96,27 @@ export async function reserveOrder(
   database: NodePgDatabase,
   params: ReserveOrderParams,
 ): Promise<ReserveOrderResult> {
-  const { offerId, amountMinor, currency } = params;
-
-  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
-    throw new Error(`reserveOrder: amountMinor must be a positive integer (${amountMinor})`);
-  }
+  const { offerId } = params;
 
   try {
-    const [order] = await database
-      .insert(ordersTable)
-      .values({ offerId, amountMinor, currency })
-      .returning();
+    // Atomic derive-from-offer: amount/currency can never be caller-supplied.
+    const result = await database.execute<SelectOrder>(sql`
+      INSERT INTO orders (offer_id, amount_minor, currency)
+      SELECT id, total_minor, currency FROM offers WHERE id = ${offerId}
+      RETURNING *
+    `);
 
-    return { reserved: true, order: order! };
+    const order = (result.rows as unknown as SelectOrder[])[0];
+    if (!order) {
+      throw new Error(`reserveOrder: no offer found for offerId "${offerId}"`);
+    }
+    // drizzle's raw execute returns snake_case columns; normalize via a
+    // follow-up select so callers get the typed SelectOrder shape.
+    const [typed] = await database
+      .select()
+      .from(ordersTable)
+      .where(eq(ordersTable.id, order.id));
+    return { reserved: true, order: typed! };
   } catch (error) {
     if (isUniqueViolationOn(error, ORDERS_OFFER_ID_UNIQUE_CONSTRAINT)) {
       return { reserved: false, reason: "ORDER_ALREADY_EXISTS" };
@@ -127,7 +139,10 @@ export type AttachRailOrderParams = {
 /**
  * Records the Razorpay order id (and raw payload) onto an already-reserved
  * row, once the POST that `reserveOrder` guarded has actually succeeded.
- * Returns the updated row, or `undefined` if `orderId` doesn't exist.
+ * Write-once: only touches rows where `rail_order_id IS NULL`, so a second
+ * call never overwrites existing reconciliation data and never trips the
+ * unique `rail_order_id` index. Returns the updated row, or `undefined` if
+ * `orderId` doesn't exist, or the existing row if it was already attached.
  */
 export async function attachRailOrder(
   database: NodePgDatabase,
@@ -138,8 +153,33 @@ export async function attachRailOrder(
   const [order] = await database
     .update(ordersTable)
     .set({ railOrderId, railPayload: railPayload ?? null })
-    .where(eq(ordersTable.id, orderId))
+    .where(and(eq(ordersTable.id, orderId), isNull(ordersTable.railOrderId)))
     .returning();
 
-  return order;
+  if (order) return order;
+
+  // No row updated — either orderId doesn't exist or railOrderId already set.
+  // Return the existing row (if any) without overwriting.
+  const [existing] = await database
+    .select()
+    .from(ordersTable)
+    .where(eq(ordersTable.id, orderId));
+  return existing;
+}
+
+/**
+ * Deletes a reservation that never reached the rail (or whose rail attach
+ * failed). Used by `createOrder` to unblock retries when Razorpay or the
+ * attach step throws — otherwise the local reservation would permanently
+ * occupy the offer's unique slot and `OrderAlreadyExistsError` would block
+ * every retry. Only the caller that created the reservation should call this,
+ * and only when `rail_order_id IS NULL` (guarded here).
+ */
+export async function deleteUnattachedOrder(
+  database: NodePgDatabase,
+  orderId: string,
+): Promise<void> {
+  await database
+    .delete(ordersTable)
+    .where(and(eq(ordersTable.id, orderId), isNull(ordersTable.railOrderId)));
 }

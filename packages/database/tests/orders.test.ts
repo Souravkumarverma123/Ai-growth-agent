@@ -107,11 +107,7 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
     const offerId = await insertOffer({ sessionId, index: 0, totalMinor: 302_000 });
     const db = await getTestDb();
 
-    const result = await reserveOrder(db, {
-      offerId,
-      amountMinor: 302_000,
-      currency: "INR",
-    });
+    const result = await reserveOrder(db, { offerId });
 
     expect(result.reserved).toBe(true);
     if (result.reserved) {
@@ -135,10 +131,10 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
       const offerId = await insertOffer({ sessionId, index: 1, totalMinor: 302_000 });
       const db = await getTestDb();
 
-      const first = await reserveOrder(db, { offerId, amountMinor: 302_000, currency: "INR" });
+      const first = await reserveOrder(db, { offerId });
       expect(first.reserved).toBe(true);
 
-      const second = await reserveOrder(db, { offerId, amountMinor: 302_000, currency: "INR" });
+      const second = await reserveOrder(db, { offerId });
       expect(second).toEqual({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
 
       const rows = await ordersFor(offerId);
@@ -158,9 +154,7 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
       const ATTEMPT_COUNT = 20;
 
       const results = await Promise.all(
-        Array.from({ length: ATTEMPT_COUNT }, () =>
-          reserveOrder(db, { offerId, amountMinor: 302_000, currency: "INR" }),
-        ),
+        Array.from({ length: ATTEMPT_COUNT }, () => reserveOrder(db, { offerId })),
       );
 
       const successes = results.filter((result) => result.reserved);
@@ -182,22 +176,22 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
     30_000,
   );
 
-  it.each([
-    ["negative", -100],
-    ["zero", 0],
-    ["non-integer", 100.5],
-  ])("rejects a %s amountMinor before touching the database", async (_label, amountMinor) => {
+  it("derives amount and currency from the offer row, not from caller input", async () => {
     const merchantId = await insertMerchant();
     const sessionId = await insertSession(merchantId, 3);
-    const offerId = await insertOffer({ sessionId, index: 3, totalMinor: 302_000 });
+    const offerId = await insertOffer({ sessionId, index: 3, totalMinor: 500_000 });
     const db = await getTestDb();
 
-    await expect(
-      reserveOrder(db, { offerId, amountMinor, currency: "INR" }),
-    ).rejects.toThrow(/amountMinor must be a positive integer/);
+    const result = await reserveOrder(db, { offerId });
+    expect(result.reserved).toBe(true);
+    if (result.reserved) {
+      expect(result.order.amountMinor).toBe(500_000);
+      expect(result.order.currency).toBe("INR");
+    }
 
+    // No amount param exists to mismatch — the reservation is always offer-exact.
     const rows = await ordersFor(offerId);
-    expect(rows).toHaveLength(0);
+    expect(rows[0]!.amountMinor).toBe(500_000);
   });
 
   it("attachRailOrder persists the rail order id and payload onto the reserved row", async () => {
@@ -206,11 +200,7 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
     const offerId = await insertOffer({ sessionId, index: 4, totalMinor: 302_000 });
     const db = await getTestDb();
 
-    const reservation = await reserveOrder(db, {
-      offerId,
-      amountMinor: 302_000,
-      currency: "INR",
-    });
+    const reservation = await reserveOrder(db, { offerId });
     expect(reservation.reserved).toBe(true);
     if (!reservation.reserved) return;
 
@@ -222,5 +212,53 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
 
     expect(updated?.railOrderId).toBe("order_mock_rzp");
     expect(updated?.railPayload).toEqual({ id: "order_mock_rzp", status: "created" });
+  });
+
+  it("attachRailOrder is write-once — second attach does not overwrite existing rail id", async () => {
+    const merchantId = await insertMerchant();
+    const sessionId = await insertSession(merchantId, 5);
+    const offerId = await insertOffer({ sessionId, index: 5, totalMinor: 302_000 });
+    const db = await getTestDb();
+
+    const reservation = await reserveOrder(db, { offerId });
+    expect(reservation.reserved).toBe(true);
+    if (!reservation.reserved) return;
+
+    await attachRailOrder(db, {
+      orderId: reservation.order.id,
+      railOrderId: "order_first",
+      railPayload: { id: "order_first" },
+    });
+
+    const second = await attachRailOrder(db, {
+      orderId: reservation.order.id,
+      railOrderId: "order_second",
+      railPayload: { id: "order_second" },
+    });
+
+    expect(second?.railOrderId).toBe("order_first");
+    expect(second?.railPayload).toEqual({ id: "order_first" });
+
+    const rows = await ordersFor(offerId);
+    expect(rows[0]!.railOrderId).toBe("order_first");
+  });
+
+  it("deleteUnattachedOrder frees a failed reservation so the offer can be retried", async () => {
+    const { deleteUnattachedOrder } = await import("../repositories/orders");
+    const merchantId = await insertMerchant();
+    const sessionId = await insertSession(merchantId, 6);
+    const offerId = await insertOffer({ sessionId, index: 6, totalMinor: 302_000 });
+    const db = await getTestDb();
+
+    const first = await reserveOrder(db, { offerId });
+    expect(first.reserved).toBe(true);
+    if (!first.reserved) return;
+
+    // Simulate Razorpay failure — reservation never got a rail id, so delete should free it
+    await deleteUnattachedOrder(db, first.order.id);
+
+    const second = await reserveOrder(db, { offerId });
+    expect(second.reserved).toBe(true);
+    expect(second.reserved && second.order.id).not.toBe(first.order.id);
   });
 });

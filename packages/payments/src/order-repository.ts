@@ -19,8 +19,6 @@ import type { RazorpayOrder } from "./razorpay-client";
 
 export type ReserveLocalOrderParams = {
   offerId: string;
-  amountMinor: number;
-  currency: string;
 };
 
 export type { ReserveOrderResult };
@@ -42,4 +40,11 @@ export async function attachRailOrderId(
     railOrderId: railOrder.id,
     railPayload: railOrder,
   });
+}
+
+export async function cancelUnattachedOrder(orderId: string): Promise<void> {
+  const { deleteUnattachedOrder } = await import(
+    "@repo/database/repositories/orders"
+  );
+  return deleteUnattachedOrder(db, orderId);
 }

@@ -18,6 +18,7 @@ import { createOrder, OrderAlreadyExistsError } from "../src/create-order";
 const getOfferById = vi.fn();
 const reserveLocalOrder = vi.fn();
 const attachRailOrderId = vi.fn();
+const cancelUnattachedOrder = vi.fn();
 const createRazorpayOrder = vi.fn();
 
 vi.mock("../src/offer-repository", () => ({
@@ -27,6 +28,7 @@ vi.mock("../src/offer-repository", () => ({
 vi.mock("../src/order-repository", () => ({
   reserveLocalOrder: (params: unknown) => reserveLocalOrder(params),
   attachRailOrderId: (orderId: string, railOrder: unknown) => attachRailOrderId(orderId, railOrder),
+  cancelUnattachedOrder: (orderId: string) => cancelUnattachedOrder(orderId),
 }));
 
 vi.mock("../src/razorpay-client", () => ({
@@ -63,10 +65,12 @@ beforeEach(() => {
   getOfferById.mockReset();
   reserveLocalOrder.mockReset();
   attachRailOrderId.mockReset();
+  cancelUnattachedOrder.mockReset();
   createRazorpayOrder.mockReset();
 
   reserveLocalOrder.mockResolvedValue(makeReservation());
   attachRailOrderId.mockResolvedValue(undefined);
+  cancelUnattachedOrder.mockResolvedValue(undefined);
   createRazorpayOrder.mockResolvedValue({ id: "order_mock" });
 });
 
@@ -200,5 +204,24 @@ describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
     await createOrder("offer-1");
 
     expect(attachRailOrderId).toHaveBeenCalledWith("local-order-xyz", { id: "order_rzp_123" });
+  });
+
+  it("when Razorpay fails, the reservation is freed so a retry can create the rail order", async () => {
+    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+    reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+    createRazorpayOrder.mockRejectedValue(new Error("razorpay down"));
+
+    await expect(createOrder("offer-1")).rejects.toThrow(/razorpay down/);
+    expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
+  });
+
+  it("when attach fails after Razorpay succeeds, the reservation is freed and error propagates", async () => {
+    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+    reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+    createRazorpayOrder.mockResolvedValue({ id: "order_rzp_123" });
+    attachRailOrderId.mockRejectedValue(new Error("db attach failed"));
+
+    await expect(createOrder("offer-1")).rejects.toThrow(/db attach failed/);
+    expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
   });
 });
