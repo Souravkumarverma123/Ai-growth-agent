@@ -7,6 +7,7 @@
     "@repo/typescript-config": "workspace:*",
     "@types/pg": "^8.23.1",
     "dotenv-cli": "^11.0.0",
+    "eslint": "^9.39.5",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
@@ -16,12 +17,15 @@
     "trpc-to-openapi": "^3.3.0",
     "zod": "^4.5.4",
     "zod-openapi": "^5.4.6",
+    "@repo/agent": "workspace:*",
     "@repo/policy": "workspace:*",
     "@repo/database": "workspace:*",
+    "@repo/payments": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.23.0"
   },
   "scripts": {
+    "lint": "eslint . --max-warnings 0",
     "check-types": "tsc --noEmit",
     "test": "dotenv -- vitest run"
   }

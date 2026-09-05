@@ -494,9 +494,15 @@ importers:
 
   packages/trpc:
     dependencies:
+      '@repo/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@repo/database':
         specifier: workspace:*
         version: link:../database
+      '@repo/payments':
+        specifier: workspace:*
+        version: link:../payments
       '@repo/policy':
         specifier: workspace:*
         version: link:../policy
@@ -534,6 +540,9 @@ importers:
       dotenv-cli:
         specifier: ^11.0.0
         version: 11.0.0
+      eslint:
+        specifier: ^9.39.5
+        version: 9.39.5(jiti@2.7.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
