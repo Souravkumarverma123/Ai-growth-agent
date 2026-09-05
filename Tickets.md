@@ -490,7 +490,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-202 — Merchant agent orchestration
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-110, TICKET-201
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-110, TICKET-201
 
 **Objective.** Run the negotiation loop: context in, intent out, offer minted, round advanced.
 
