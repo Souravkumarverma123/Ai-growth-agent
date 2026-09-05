@@ -19,8 +19,11 @@ import { ordersTable, type SelectOrder } from "../models/payment";
  * relies on Postgres to reject a second concurrent insert for the same
  * `offerId` at the database level (error code `23505`, unique_violation),
  * and translates that into a clean domain result — `{ reserved: false,
- * reason: "ORDER_ALREADY_EXISTS" }` — rather than letting a raw
- * Postgres error escape to a caller that shouldn't know what `23505` means.
+ * reason: "ORDER_ALREADY_EXISTS", existingOrder }` — rather than letting a
+ * raw Postgres error escape to a caller that shouldn't know what `23505`
+ * means. `existingOrder` lets the caller tell a genuinely complete order
+ * (`railOrderId` set) apart from a reservation stuck without one — see
+ * `createOrder`'s own handling in `packages/payments/src/create-order.ts`.
  * Two concurrent `reserveOrder` calls for the same offer therefore always
  * leave exactly one row: Postgres's own unique index serializes the two
  * inserts, and only one can ever commit.
@@ -49,7 +52,7 @@ export type ReserveOrderParams = {
 
 export type ReserveOrderResult =
   | { reserved: true; order: SelectOrder }
-  | { reserved: false; reason: "ORDER_ALREADY_EXISTS" };
+  | { reserved: false; reason: "ORDER_ALREADY_EXISTS"; existingOrder: SelectOrder };
 
 type PgLikeError = { code?: string; constraint?: string; cause?: unknown };
 
@@ -119,7 +122,15 @@ export async function reserveOrder(
     return { reserved: true, order: typed! };
   } catch (error) {
     if (isUniqueViolationOn(error, ORDERS_OFFER_ID_UNIQUE_CONSTRAINT)) {
-      return { reserved: false, reason: "ORDER_ALREADY_EXISTS" };
+      // The unique constraint is on offerId, so a violation means exactly
+      // one row for this offer already exists — fetch it so the caller can
+      // tell a genuinely complete order (railOrderId set) apart from a
+      // reservation stuck without one (see createOrder's own handling).
+      const [existingOrder] = await database
+        .select()
+        .from(ordersTable)
+        .where(eq(ordersTable.offerId, offerId));
+      return { reserved: false, reason: "ORDER_ALREADY_EXISTS", existingOrder: existingOrder! };
     }
     // Anything else (a missing offer FK, a connection failure, ...) is a real
     // problem this module has no clean domain code for — fail closed and

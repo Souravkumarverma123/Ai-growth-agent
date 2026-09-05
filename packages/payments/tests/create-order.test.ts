@@ -1,7 +1,7 @@
 import type { SelectOffer } from "@repo/database/models/offer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createOrder, OrderAlreadyExistsError } from "../src/create-order";
+import { createOrder, OrderAlreadyExistsError, OrderReservationIncompleteError } from "../src/create-order";
 
 /**
  * TICKET-301 — CONTRACTS.md §2, B3.
@@ -69,7 +69,12 @@ beforeEach(() => {
   createRazorpayOrder.mockReset();
 
   reserveLocalOrder.mockResolvedValue(makeReservation());
-  attachRailOrderId.mockResolvedValue(undefined);
+  // Mirrors attachRailOrder's real write-once return: the updated row,
+  // carrying whichever rail order id this call actually recorded — so the
+  // happy path's own "did the write actually take" check passes by default.
+  attachRailOrderId.mockImplementation(async (_orderId: string, railOrder: { id: string }) => ({
+    railOrderId: railOrder.id,
+  }));
   cancelUnattachedOrder.mockResolvedValue(undefined);
   createRazorpayOrder.mockResolvedValue({ id: "order_mock" });
 });
@@ -165,17 +170,39 @@ describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
   });
 
   it(
-    "when reservation fails because an order already exists for this offer, " +
+    "when the existing reservation already has a rail order attached, " +
       "createOrder surfaces a clean OrderAlreadyExistsError and never reaches Razorpay",
     async () => {
       getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
-      reserveLocalOrder.mockResolvedValue({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+      reserveLocalOrder.mockResolvedValue({
+        reserved: false,
+        reason: "ORDER_ALREADY_EXISTS",
+        existingOrder: { id: "existing-order-1", railOrderId: "order_existing_rzp" },
+      });
 
       await expect(createOrder("offer-1")).rejects.toThrow(OrderAlreadyExistsError);
       await expect(createOrder("offer-1")).rejects.toThrow(/already exists/);
 
       expect(createRazorpayOrder).not.toHaveBeenCalled();
       expect(attachRailOrderId).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    "when the existing reservation has no rail order attached yet, createOrder throws " +
+      "OrderReservationIncompleteError instead of blindly retrying or claiming it already exists",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue({
+        reserved: false,
+        reason: "ORDER_ALREADY_EXISTS",
+        existingOrder: { id: "stuck-order-1", railOrderId: null },
+      });
+
+      await expect(createOrder("offer-1")).rejects.toThrow(OrderReservationIncompleteError);
+      await expect(createOrder("offer-1")).rejects.not.toThrow(OrderAlreadyExistsError);
+
+      expect(createRazorpayOrder).not.toHaveBeenCalled();
     },
   );
 
@@ -188,9 +215,13 @@ describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
     expect(createRazorpayOrder).toHaveBeenCalledTimes(1);
 
     // Second call for the same offer: the reservation this time reflects the
-    // real database state — a row already exists — so it fails, and
-    // createOrder must not call Razorpay a second time.
-    reserveLocalOrder.mockResolvedValueOnce({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+    // real database state — a row already exists, with a rail order attached
+    // — so it fails, and createOrder must not call Razorpay a second time.
+    reserveLocalOrder.mockResolvedValueOnce({
+      reserved: false,
+      reason: "ORDER_ALREADY_EXISTS",
+      existingOrder: { id: "local-order-1", railOrderId: "order_mock" },
+    });
 
     await expect(createOrder("offer-1")).rejects.toThrow(OrderAlreadyExistsError);
     expect(createRazorpayOrder).toHaveBeenCalledTimes(1);
@@ -215,13 +246,34 @@ describe("createOrder(offerId) — TICKET-302 reserve-before-POST", () => {
     expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
   });
 
-  it("when attach fails after Razorpay succeeds, the reservation is freed and error propagates", async () => {
-    getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
-    reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
-    createRazorpayOrder.mockResolvedValue({ id: "order_rzp_123" });
-    attachRailOrderId.mockRejectedValue(new Error("db attach failed"));
+  it(
+    "when attach fails after Razorpay succeeds, the reservation is NOT freed — " +
+      "a live rail order may already exist, so retrying blindly would risk creating a second one",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+      createRazorpayOrder.mockResolvedValue({ id: "order_rzp_123" });
+      attachRailOrderId.mockRejectedValue(new Error("db attach failed"));
 
-    await expect(createOrder("offer-1")).rejects.toThrow(/db attach failed/);
-    expect(cancelUnattachedOrder).toHaveBeenCalledWith("local-order-xyz");
-  });
+      await expect(createOrder("offer-1")).rejects.toThrow(OrderReservationIncompleteError);
+      expect(cancelUnattachedOrder).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    "when attachRailOrder's write-once guard silently no-ops (already attached to a " +
+      "different rail order), createOrder still throws OrderReservationIncompleteError",
+    async () => {
+      getOfferById.mockResolvedValue(makeOffer({ id: "offer-1" }));
+      reserveLocalOrder.mockResolvedValue(makeReservation({ order: { id: "local-order-xyz" } }));
+      createRazorpayOrder.mockResolvedValue({ id: "order_rzp_123" });
+      // Simulates attachRailOrder's real behavior when the guard fails: it
+      // resolves with the EXISTING row, whose railOrderId disagrees with
+      // what we just tried to attach.
+      attachRailOrderId.mockResolvedValue({ railOrderId: "some_other_order_id" });
+
+      await expect(createOrder("offer-1")).rejects.toThrow(OrderReservationIncompleteError);
+      expect(cancelUnattachedOrder).not.toHaveBeenCalled();
+    },
+  );
 });

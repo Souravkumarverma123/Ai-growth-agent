@@ -135,7 +135,12 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
       expect(first.reserved).toBe(true);
 
       const second = await reserveOrder(db, { offerId });
-      expect(second).toEqual({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+      expect(second.reserved).toBe(false);
+      if (!second.reserved) {
+        expect(second.reason).toBe("ORDER_ALREADY_EXISTS");
+        expect(second.existingOrder.offerId).toBe(offerId);
+        expect(second.existingOrder.railOrderId).toBeNull();
+      }
 
       const rows = await ordersFor(offerId);
       expect(rows).toHaveLength(1);
@@ -164,7 +169,11 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
       expect(failures).toHaveLength(ATTEMPT_COUNT - 1);
 
       for (const failure of failures) {
-        expect(failure).toEqual({ reserved: false, reason: "ORDER_ALREADY_EXISTS" });
+        expect(failure.reserved).toBe(false);
+        if (!failure.reserved) {
+          expect(failure.reason).toBe("ORDER_ALREADY_EXISTS");
+          expect(failure.existingOrder.offerId).toBe(offerId);
+        }
       }
 
       // The actual invariant this ticket exists to protect: read back the
@@ -213,6 +222,33 @@ describe("TICKET-302 — offer-to-order uniqueness", () => {
     expect(updated?.railOrderId).toBe("order_mock_rzp");
     expect(updated?.railPayload).toEqual({ id: "order_mock_rzp", status: "created" });
   });
+
+  it(
+    "a second reservation attempt reports the existing order's railOrderId, " +
+      "so a caller can tell a completed order apart from a stuck reservation",
+    async () => {
+      const merchantId = await insertMerchant();
+      const sessionId = await insertSession(merchantId, 7);
+      const offerId = await insertOffer({ sessionId, index: 7, totalMinor: 302_000 });
+      const db = await getTestDb();
+
+      const first = await reserveOrder(db, { offerId });
+      expect(first.reserved).toBe(true);
+      if (!first.reserved) return;
+
+      await attachRailOrder(db, {
+        orderId: first.order.id,
+        railOrderId: "order_completed_rzp",
+        railPayload: { id: "order_completed_rzp" },
+      });
+
+      const second = await reserveOrder(db, { offerId });
+      expect(second.reserved).toBe(false);
+      if (!second.reserved) {
+        expect(second.existingOrder.railOrderId).toBe("order_completed_rzp");
+      }
+    },
+  );
 
   it("attachRailOrder is write-once — second attach does not overwrite existing rail id", async () => {
     const merchantId = await insertMerchant();
