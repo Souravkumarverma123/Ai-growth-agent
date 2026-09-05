@@ -233,6 +233,44 @@ describe("selectCandidate — determinism", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Large-value boundary — the tolerance check must stay exact even where
+// `bestContributionMinor * SLOW_MOVING_TOLERANCE_PERCENT` would overflow
+// Number.MAX_SAFE_INTEGER (~9.007e15) if computed as a direct product
+// ---------------------------------------------------------------------------
+
+describe("selectCandidate — the 3% band stays exact for very large contributions", () => {
+  // A concrete value, found by scanning past bestContributionMinor ~3.0e15
+  // (where best * 3 first exceeds Number.MAX_SAFE_INTEGER), at which the old
+  // `gapMinor * 100 <= bestContributionMinor * 3` formula silently rounded
+  // `bestContributionMinor * 3` to the wrong nearest double and let a
+  // candidate one minor unit past the true 3% boundary through as if it
+  // were still inside the band.
+  const HUGE_BEST_CONTRIBUTION_MINOR = 3_002_399_751_580_333;
+  // floor(HUGE_BEST_CONTRIBUTION_MINOR * 3 / 100), the true exact threshold.
+  const EXACT_THRESHOLD_MINOR = 90_071_992_547_409;
+
+  it("still prefers a slow-moving candidate exactly at the true 3% threshold", () => {
+    const best = buildTieredCandidate({ contributionMinor: HUGE_BEST_CONTRIBUTION_MINOR, clearsSlowMoving: false });
+    const atThreshold = buildTieredCandidate({
+      contributionMinor: HUGE_BEST_CONTRIBUTION_MINOR - EXACT_THRESHOLD_MINOR,
+      clearsSlowMoving: true,
+    });
+
+    expect(selectCandidate([best, atThreshold])).toBe(atThreshold);
+  });
+
+  it("does not prefer a slow-moving candidate one minor unit past the true 3% threshold", () => {
+    const best = buildTieredCandidate({ contributionMinor: HUGE_BEST_CONTRIBUTION_MINOR, clearsSlowMoving: false });
+    const justPastThreshold = buildTieredCandidate({
+      contributionMinor: HUGE_BEST_CONTRIBUTION_MINOR - (EXACT_THRESHOLD_MINOR + 1),
+      clearsSlowMoving: true,
+    });
+
+    expect(selectCandidate([best, justPastThreshold])).toBe(best);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fails closed
 // ---------------------------------------------------------------------------
 

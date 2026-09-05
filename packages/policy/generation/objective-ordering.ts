@@ -70,9 +70,17 @@ import type { TieredCandidate } from "./tiering";
  * they cannot configure it, so it is a literal constant here, not a
  * `MerchantPolicy` field. `contributionMinor` is always a nonnegative
  * integer (`minorUnitsSchema`, contracts/money.ts), so "gap is at most 3% of
- * best" is checked as `gapMinor * 100 <= bestContributionMinor * 3` — exact
- * integer arithmetic, never a float division that could round a
- * boundary-exact case the wrong way.
+ * best" is checked as `gapMinor <= floor(bestContributionMinor * 3 / 100)`.
+ * That threshold is computed via `floorPercentOfMinorUnits`, never as the
+ * direct product `bestContributionMinor * 3`: `bestContributionMinor` is
+ * only guaranteed to be a *safe* integer (up to ~9.007e15), and multiplying
+ * a value past ~3.0e15 by 3 overflows that guarantee, silently landing on
+ * the nearest representable double instead of the exact product — which can
+ * flip a boundary-exact comparison the wrong way. `floorPercentOfMinorUnits`
+ * instead splits the value into an exact `quotient*100 + remainder` first
+ * (via `%`, exact for safe integers), so only `quotient * 3` and
+ * `remainder * 3` — both far smaller than the original value — are ever
+ * multiplied.
  */
 
 /** Fixed, not configurable (PRD §6.6) — disclosed to merchants as a stated
@@ -87,18 +95,40 @@ function requireSafeInteger(value: number, description: string): MinorUnits {
 }
 
 /**
+ * `floor(valueMinor * percent / 100)`, computed without ever multiplying
+ * `valueMinor` directly by `percent`. `valueMinor` is only guaranteed to be a
+ * *safe* integer (`Number.isSafeInteger`, up to ~9.007e15) — multiplying a
+ * value past ~3.0e15 by 3 can exceed that bound, silently landing on the
+ * nearest representable double instead of the exact product. Splitting
+ * `valueMinor` into an exact `quotient*100 + remainder` first (`%` is exact
+ * for safe integers) keeps every multiplication far smaller than the
+ * original value: `quotient * percent` (quotient is `valueMinor / 100`, so
+ * at most ~9.007e13) and `remainder * percent` (remainder is under 100).
+ *
+ * For integer `gapMinor`, `gapMinor <= valueMinor*percent/100` is always
+ * equivalent to `gapMinor <= floor(valueMinor*percent/100)` — an integer can
+ * never be `<=` a real number without also being `<=` that real number's
+ * floor. So comparing against this exact threshold preserves the original
+ * `gapMinor * 100 <= valueMinor * percent` check for every input the old
+ * formula got right, while also being correct where it silently wasn't.
+ */
+function floorPercentOfMinorUnits(valueMinor: MinorUnits, percent: number): number {
+  const remainder = valueMinor % 100;
+  const quotient = (valueMinor - remainder) / 100;
+  return quotient * percent + Math.floor((remainder * percent) / 100);
+}
+
+/**
  * True when `candidate.contributionMinor` is within
  * {@link SLOW_MOVING_TOLERANCE_PERCENT}% behind `bestContributionMinor` —
  * inclusive, so a candidate exactly 3% behind counts as "within the band".
- * Integer cross-multiplication, not `gap / best <= 0.03`, so no float
- * rounding can ever move a boundary-exact case to the wrong side.
  */
 function isWithinSlowMovingBand(candidate: TieredCandidate, bestContributionMinor: MinorUnits): boolean {
   const gapMinor = requireSafeInteger(
     bestContributionMinor - candidate.contributionMinor,
     "gap to best contribution",
   );
-  return gapMinor * 100 <= bestContributionMinor * SLOW_MOVING_TOLERANCE_PERCENT;
+  return gapMinor <= floorPercentOfMinorUnits(bestContributionMinor, SLOW_MOVING_TOLERANCE_PERCENT);
 }
 
 /**
