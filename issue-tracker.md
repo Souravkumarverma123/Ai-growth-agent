@@ -69,6 +69,118 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-007 — Concurrent `packages/trpc` test files race on the shared sibling test database
+
+Status: FIXED
+Severity: MEDIUM
+Found in: merge of TICKET-403/PR #15 and TICKET-404/PR #14 into TICKET-501/PR #16
+Date: 2026-09-05
+Violates invariant: none — a test-harness gap, not application behaviour.
+
+### Problem
+
+`packages/trpc/tests/audit-route.test.ts` (TICKET-404) and
+`packages/trpc/tests/merchant-policy-approval.test.ts` (TICKET-501) each hit
+the one physical sibling test database via `@repo/database/testing/db.ts`,
+and each truncates every table between its own tests. Vitest runs different
+test files within one package concurrently by default, and
+`packages/trpc/vitest.config.ts` never opted out of that — `packages/database`
+already had (TICKET-001/ISSUE-003's original harness fix set
+`fileParallelism: false` there), but nothing carried that same guard over to
+`packages/trpc` when it gained its first real-Postgres test file.
+
+Both PRs passed cleanly in isolation (each `pnpm --filter @repo/trpc test`
+run only ever saw its own single DB-touching test file). The race only
+existed once both files landed on the same branch together, which first
+happened resolving TICKET-501's merge conflict against `main` (both TICKET-403
+and TICKET-404 had already merged ahead of it).
+
+### Expected / Actual
+
+Expected: `pnpm test` at the repo root, run after this merge, green.
+Actual: intermittent `insert or update on table "audit_events" violates
+foreign key constraint "audit_events_session_id_negotiation_sessions_id_fk"`
+— one test file's `truncateAllTables()` wiped the `negotiation_sessions` row
+the other file had just inserted and was mid-way through using.
+
+### Root Cause
+
+`packages/trpc/vitest.config.ts` had no `fileParallelism: false`, so its two
+DB-touching test files ran concurrently against the one shared sibling
+database.
+
+### Fix
+
+Added the identical guard `packages/database/vitest.config.ts` already
+carries: `fileParallelism: false` in `packages/trpc/vitest.config.ts`, with a
+comment naming both files and the shared-database reason.
+
+### Regression Test
+
+No new test added — this is a harness-configuration fix, not application
+behavior, and the two existing test files (already real-Postgres,
+already exercising truncate-between-tests) are themselves the proof: re-ran
+`pnpm --filter @repo/trpc test` and the root `pnpm test` repeatedly after the
+fix with both files present, all green.
+
+### Related Ticket
+
+None single ticket — a cross-PR interaction between TICKET-403, TICKET-404 and TICKET-501.
+
+### Status History
+
+- 2026-09-05: OPEN — found resolving TICKET-501's merge conflict against `main`.
+- 2026-09-05: FIXED — `fileParallelism: false` added to `packages/trpc/vitest.config.ts`.
+
+---
+
+## ISSUE-006 — Dev-mode CORS (`origin: "*"`) rejects every credentialed client-side tRPC call from `apps/web`
+
+Status: FIXED
+Severity: MEDIUM
+Found in: TICKET-501
+Date: 2026-09-05
+Violates invariant: none
+
+### Problem
+
+`apps/web/trpc/create-client.ts` sends every request with `credentials: "include"` (needed so browser-side tRPC calls carry cookies). `apps/api/src/server.ts`'s dev-mode CORS middleware was configured with `cors({ origin: "*" })`. A wildcard `Access-Control-Allow-Origin` combined with a credentialed request is rejected by the browser itself (not a server-side 4xx — the fetch never even completes), regardless of what the server returns.
+
+### Expected
+
+The new TICKET-501 merchant policy page (the first *client-side* interactive tRPC consumer in this codebase — every prior usage was a server component calling `api.*.query()` from Node, which never goes through browser CORS at all) should be able to call `merchant.getPolicy` / `merchant.approvePolicy` / `merchant.setNegotiationEnabled` from the browser and round-trip against the real API + Postgres.
+
+### Actual
+
+Every client-side call failed in the browser console with: `Access to fetch at 'http://localhost:8000/trpc/merchant.getPolicy?...' from origin 'http://localhost:3000' has been blocked by CORS policy: The value of the 'Access-Control-Allow-Origin' header ... must not be the wildcard '*' when the request's credentials mode is 'include'.` The policy form never loaded in-browser. Verified independently via `curl` (bypasses browser CORS enforcement entirely) that `getPolicy` / `approvePolicy` / `setNegotiationEnabled` all work correctly against the real Postgres instance — so the bug is purely transport-layer CORS configuration, not the procedures implemented in this ticket.
+
+### Root Cause
+
+Leftover dev CORS config from the template this repo was scaffolded from (`apps/api` is outside TICKET-501's own affected packages `apps/web` / `packages/trpc`, but the misconfiguration blocks any browser-based client of the API, present or future, the moment a client component tries to use `trpc.*.useQuery` / `useMutation` instead of the server-side proxy client).
+
+### Impact
+
+Blocked in-browser verification of the merchant policy screen — the literal DoD step "start the dev server ... and check the new page renders and the approve/kill-switch actions actually round-trip." Would have silently blocked every future client-side tRPC consumer too.
+
+### Fix
+
+Applied. `apps/api/src/server.ts`: dev-mode CORS changed from `cors({ origin: "*" })` to `cors({ origin: true, credentials: true })` — `origin: true` reflects the requesting origin (required once credentials are involved; a wildcard is invalid alongside them), and `credentials: true` emits the `Access-Control-Allow-Credentials` header the browser also requires. Gated the same as before (`NODE_ENV !== "prod"`), so no production behavior changed.
+
+### Regression Test
+
+None added. This is transport/dev-tooling configuration, not application behavior — the existing `router-boot.test.ts` doesn't exercise HTTP/CORS at all, and standing up a browser-CORS test harness for one config line isn't proportionate. Re-verified manually: the merchant policy page loads, approves, and flips the kill switch against the real dev API + Postgres after the fix.
+
+### Related Ticket
+
+TICKET-501
+
+### Status History
+
+- 2026-09-05: OPEN
+- 2026-09-05: FIXED — dev CORS now reflects origin + allows credentials
+
+---
+
 ## ISSUE-005 — TICKET-403's ledger-writer functions can't know *why* a hold is being released/reserved/committed
 
 Status: FIXED

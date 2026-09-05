@@ -1,5 +1,11 @@
 import { TRPCError } from "@trpc/server";
 
+import {
+  approveMerchantPolicy,
+  getMerchantPolicy,
+  setNegotiationEnabled as setNegotiationEnabledRepo,
+} from "@repo/database/repositories/merchant-policies";
+
 import { z } from "../../schema";
 import { publicProcedure, router } from "../../trpc";
 import { generatePath } from "../../utils/path-generator";
@@ -46,7 +52,29 @@ export const merchantRouter = router({
     .meta({ openapi: { method: "GET", path: getPath("/policy"), tags: TAGS } })
     .input(z.object({ merchantId: z.string() }))
     .output(merchantPolicyViewSchema)
-    .query(async () => notImplemented("TICKET-501")),
+    .query(async ({ input, ctx }) => {
+      const policy = await getMerchantPolicy(ctx.db, input.merchantId);
+      if (!policy) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `No policy found for merchant ${input.merchantId}`,
+        });
+      }
+
+      return {
+        merchantId: policy.merchantId,
+        negotiationEnabled: policy.negotiationEnabled,
+        campaignBudgetTotalMinor: policy.campaignBudgetTotalMinor,
+        perDealCapMinor: policy.perDealCapMinor,
+        maxRounds: policy.maxRounds,
+        concessionCurve: policy.concessionCurve,
+        offerTtlSeconds: policy.offerTtlSeconds,
+        slowMovingTolerance: policy.slowMovingTolerance,
+        allowedCommitments: policy.allowedCommitments,
+        autonomousPaymentExecution: policy.autonomousPaymentExecution,
+        policyVersion: policy.policyVersion,
+      };
+    }),
 
   /**
    * Approving policy is the delegation moment — the only point at which a human
@@ -66,7 +94,16 @@ export const merchantRouter = router({
       }),
     )
     .output(z.object({ policyVersion: z.number().int().nonnegative() }))
-    .mutation(async () => notImplemented("TICKET-501")),
+    .mutation(async ({ input, ctx }) => {
+      try {
+        return await approveMerchantPolicy(ctx.db, input);
+      } catch {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `No policy found for merchant ${input.merchantId}`,
+        });
+      }
+    }),
 
   /**
    * The kill switch is EXEMPT from the policy freeze (RA-1): it may be flipped
@@ -77,7 +114,16 @@ export const merchantRouter = router({
     .meta({ openapi: { method: "POST", path: getPath("/kill-switch"), tags: TAGS } })
     .input(z.object({ merchantId: z.string(), enabled: z.boolean() }))
     .output(z.object({ negotiationEnabled: z.boolean() }))
-    .mutation(async () => notImplemented("TICKET-501")),
+    .mutation(async ({ input, ctx }) => {
+      const result = await setNegotiationEnabledRepo(ctx.db, input.merchantId, input.enabled);
+      if (!result) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `No policy found for merchant ${input.merchantId}`,
+        });
+      }
+      return result;
+    }),
 
   /** available = total - reserved - committed. The number that counts down. */
   getCampaignBudget: publicProcedure
