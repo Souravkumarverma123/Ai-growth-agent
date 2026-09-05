@@ -3,13 +3,13 @@
   "extends": ["//"],
   "tasks": {
     "lint": {
-      "passThroughEnv": ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
+      "passThroughEnv": ["REAL_DATABASE_URL", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
     },
     "check-types": {
-      "passThroughEnv": ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
+      "passThroughEnv": ["REAL_DATABASE_URL", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
     },
     "test": {
-      "passThroughEnv": ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
+      "passThroughEnv": ["REAL_DATABASE_URL", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
     }
   }
 }

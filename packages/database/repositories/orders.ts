@@ -227,3 +227,72 @@ export async function deleteUnattachedOrder(
     .delete(ordersTable)
     .where(and(eq(ordersTable.id, orderId), isNull(ordersTable.railOrderId)));
 }
+
+/** Plain lookup by local id — TICKET-304's reconciler starts from an order
+ *  row, not an offer id, since a poll iterates orders directly. */
+export async function getOrderById(
+  database: NodePgDatabase,
+  orderId: string,
+): Promise<SelectOrder | undefined> {
+  const [order] = await database.select().from(ordersTable).where(eq(ordersTable.id, orderId));
+  return order;
+}
+
+/**
+ * TICKET-304 — every order this merchant's polling loop still needs to ask
+ * the rail about: attached to a real rail order (nothing to poll before
+ * `attachRailOrder` runs), and not yet at a terminal `localState` (once an
+ * order is `CAPTURED` or `FAILED`, PRD §12's one-directional reconciliation
+ * has already run its course for it — a later poll would just re-confirm
+ * the same fact `reconcileOrder`'s own idempotency guard already handles,
+ * so excluding terminal orders here keeps the polling set small rather than
+ * relying on that guard alone).
+ */
+export async function listOrdersAwaitingReconciliation(
+  database: NodePgDatabase,
+): Promise<SelectOrder[]> {
+  return database
+    .select()
+    .from(ordersTable)
+    .where(
+      and(
+        sql`${ordersTable.railOrderId} IS NOT NULL`,
+        sql`${ordersTable.localState} IN ('CREATED', 'AUTHORIZED')`,
+      ),
+    );
+}
+
+export type RecordRailReportParams = {
+  localState: SelectOrder["localState"];
+  railState: SelectOrder["railState"];
+  railPayload: Record<string, unknown>;
+};
+
+/**
+ * Overwrites this order's local belief with what the rail just reported —
+ * PRD §12: "the rail's state overwrites local belief, always." Deliberately
+ * unconditional (no CAS guard): unlike `attachRailOrder`'s write-once
+ * semantics, there is no "already correct, don't touch it" case here, only
+ * "the rail's answer, whatever it is, replaces whatever we believed a
+ * moment ago" — true even when the new answer contradicts the old one
+ * (that contradiction is `reconcileOrder`'s `CONTRADICTS_LOCAL` case, which
+ * decides the ledger event; this function only ever performs the
+ * overwrite itself, the same way for every outcome).
+ */
+export async function recordRailReport(
+  database: NodePgDatabase,
+  orderId: string,
+  params: RecordRailReportParams,
+): Promise<SelectOrder | undefined> {
+  const [order] = await database
+    .update(ordersTable)
+    .set({
+      localState: params.localState,
+      railState: params.railState,
+      railPayload: params.railPayload,
+      lastPolledAt: new Date(),
+    })
+    .where(eq(ordersTable.id, orderId))
+    .returning();
+  return order;
+}

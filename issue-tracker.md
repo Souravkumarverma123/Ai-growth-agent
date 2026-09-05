@@ -69,6 +69,89 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-014 — `packages/payments`' first real-Postgres test files raced against each other on the shared sibling test database (recurrence of ISSUE-007)
+
+Status: FIXED
+Severity: MEDIUM
+Found in: TICKET-304 (RailStateSource and polling reconciler)
+Date: 2026-09-06
+Violates invariant: none — a test-harness gap, not application behaviour.
+
+### Problem
+
+`reconcile-order.test.ts` and `poll-pending-orders.test.ts` are the first
+`packages/payments` tests to use `@repo/database/testing/db.ts`'s real
+sibling-database harness (CONTRACTS.md §8 — every prior test in this package
+mocks its dependencies). `packages/payments/vitest.config.ts` had no
+`fileParallelism: false`, so Vitest ran both new files concurrently against
+the one physical test database, and one file's `truncateAllTables()` wiped
+rows the other file had just inserted mid-test.
+
+### Expected / Actual
+
+Expected: both new test files green in isolation and together.
+Actual: intermittent `insert or update on table "offers" violates foreign
+key constraint "offers_session_id_negotiation_sessions_id_fk"`, a session
+row unexpectedly `undefined` mid-assertion, and a deferred-FK `commit`
+failure — all symptoms of a row existing when read but gone by the time a
+later statement in the same test needed it.
+
+### Root Cause
+
+Identical to ISSUE-007: `packages/payments/vitest.config.ts` never carried
+the `fileParallelism: false` guard that `packages/database` and
+`packages/trpc` already have for the exact same reason — nothing about
+adding a *second* real-DB test file to a package that already has one
+reminds you the guard is missing, since each file alone still passes fine.
+
+### Fix
+
+Added `fileParallelism: false` to `packages/payments/vitest.config.ts`, with
+a comment naming both files and pointing at ISSUE-003/ISSUE-007 as
+precedent.
+
+Two unrelated, smaller issues surfaced getting these two files running at
+all, fixed in the same pass:
+- `reconcile-order.ts` imported `getCampaignHoldByOfferId` from
+  `@repo/database/repositories/campaign-holds` (no such export there — it
+  lives in `campaign-budget-snapshot.ts`) and `packages/payments/package.json`
+  never listed `drizzle-orm` as a direct dependency despite importing
+  `NodePgDatabase` from it. Both were TICKET-304 code that had never been
+  type-checked before this session picked it back up.
+- `packages/payments/vitest.config.ts` pins `DATABASE_URL` to an inert
+  placeholder for every other (mocked) test in this package, on purpose
+  (see that file's own comment) — these two new files need the real value,
+  restored from a preserved `REAL_DATABASE_URL` before dynamically importing
+  the test-db harness. `REAL_DATABASE_URL` needed declaring in
+  `packages/payments/turbo.json` for turbo's env-var lint rule — that file
+  already existed (`7c4b9b6`, declaring `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`)
+  and was overwritten from scratch without reading it first, which
+  transiently dropped those two declarations and made lint flag them as
+  newly-undeclared. Caught by the very next lint run and restored alongside
+  the new addition — net diff is additive only, but worth naming as a
+  process mistake (should have read the file before writing it), not a
+  genuine pre-existing gap.
+
+### Regression Test
+
+No new test added for the race itself — same reasoning as ISSUE-007: this is
+a harness-configuration fix, and the two existing new test files (now
+running serially) are the proof. Ran `pnpm test` at the repo root repeatedly
+with both files present, all green.
+
+### Related Ticket
+
+TICKET-304.
+
+### Status History
+
+- 2026-09-06: OPEN — found finishing TICKET-304's test suite.
+- 2026-09-06: FIXED — `fileParallelism: false` added to
+  `packages/payments/vitest.config.ts`; the two incidental import/dependency
+  bugs and the turbo env-var gaps fixed alongside.
+
+---
+
 ## ISSUE-013 — `acceptOffer`'s autonomous-payment refusal threw from inside its own transaction, silently rolling back the audit event it was reporting
 
 Status: FIXED
