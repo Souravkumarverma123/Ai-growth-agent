@@ -776,7 +776,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-402 — Reason code enforcement at every transition
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-401, TICKET-002
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-401, TICKET-002
 
 **Objective.** Guarantee every state transition writes exactly one code.
 
