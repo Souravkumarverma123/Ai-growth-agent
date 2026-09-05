@@ -753,7 +753,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-401 — Append-only ledger writer with hash chaining
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-005
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-005
 
 **Objective.** One append path, hash-linked, no mutation.
 
