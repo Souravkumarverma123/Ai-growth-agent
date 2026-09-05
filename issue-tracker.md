@@ -69,7 +69,7 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-## ISSUE-009 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
+## ISSUE-010 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
 
 Status: FIXED
 Severity: HIGH
@@ -187,6 +187,83 @@ TICKET-111 (found and fixed here)
 - 2026-09-05: FIXED — raw-SQL timestamp reads and writes in
   `offers.ts` now force UTC explicitly, matching the discipline
   `drizzle-orm`'s own column mapping already uses for the same column type.
+
+---
+
+## ISSUE-009 — `createOrder` POSTs to Razorpay without reserving a local order first, so concurrent/retried calls can mint two orders for one offer
+
+Status: OPEN
+Severity: HIGH
+Found in: TICKET-301 (flagged independently by CodeAnt on commit `fa2b1c2e`, rated MEDIUM there)
+Date: 2026-09-05
+Violates invariant: 9 (one offer can mint exactly one order) — at risk, not yet breached in a shipped path
+
+### Problem
+
+`packages/payments/src/create-order.ts`'s `createOrder(offerId)` does:
+
+```
+const offer = await getOfferById(offerId);       // read-only
+const request = buildRazorpayOrderRequest(offer); // pure
+return createRazorpayOrder(request);              // external POST
+```
+
+There is no local orders row reserved or persisted before the external
+POST. Two calls with the same `offerId` — a genuine race, or a client
+retry after a slow/dropped response — both read the same offer and both
+POST to Razorpay, producing two live orders for one offer. Razorpay does
+not dedupe on `receipt` by default, so the offer id in `receipt` does not
+prevent this.
+
+### Expected / Actual
+
+Expected: an offer maps to at most one Razorpay order, no matter how many
+callers race or retry.
+Actual: N concurrent/retried `createOrder(offerId)` calls create up to N
+Razorpay orders.
+
+### Root Cause
+
+Not a defect in TICKET-301's implementation — it is a scope boundary.
+TICKET-301's only economic acceptance criterion is "amount sent to
+Razorpay always equals `offer.total_minor`", which holds. Offer-to-order
+uniqueness is deliberately **not** in TICKET-301: `offer-repository.ts` is
+kept read-only on purpose so it does not collide with TICKET-111, which
+owns offer-state writes on its own branch. The uniqueness constraint plus
+the transactional reserve-before-POST invariant are the entire scope of
+**TICKET-302 — Offer-to-order uniqueness** (depends on TICKET-111 +
+TICKET-301, P0, TODO).
+
+### Fix
+
+Deferred to TICKET-302 by design. Do **not** implement it on the
+TICKET-301 branch: it needs a local orders table + migration in
+`packages/database` and a transactional "reserve local order, then POST,
+then persist rail id" flow tied to TICKET-111's offer-consume logic.
+Doing that here would break the read-only boundary `offer-repository.ts`
+was written to keep and cause the exact parallel-work collision
+CONTRACTS.md §2 warns about.
+
+For the CodeAnt gate on the TICKET-301 PR: dismiss this finding with a
+reference to ISSUE-009 / TICKET-302. It is "not fixed on this branch by
+design", not "won't ever fix" — hence Status OPEN, not WONTFIX.
+
+### Regression Test
+
+Owned by TICKET-302: a real-Postgres concurrency test — N concurrent
+`createOrder(offerId)` calls for one offer result in exactly one order
+row / one Razorpay POST. Also covered by TICKET-602's offer-lifecycle
+idempotency suite.
+
+### Related Ticket
+
+TICKET-302 (owner), TICKET-301 (where found), TICKET-602 (invariant suite)
+
+### Status History
+
+- 2026-09-05: OPEN — flagged by CodeAnt on commit `fa2b1c2e` during
+  TICKET-301 review; validated as a real gap, confirmed already owned by
+  TICKET-302, recorded here so TICKET-302 is not dropped.
 
 ---
 

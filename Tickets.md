@@ -394,7 +394,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-109 — Objective ordering and slow-moving tolerance
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-102, TICKET-104
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-102, TICKET-104
 
 **Objective.** Select within the feasible set by a stated deterministic ordering.
 
@@ -490,7 +490,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-202 — Merchant agent orchestration
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-110, TICKET-201
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-110, TICKET-201
 
 **Objective.** Run the negotiation loop: context in, intent out, offer minted, round advanced.
 
@@ -611,7 +611,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-301 — Razorpay test-mode order creation
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-110
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-110
 
 **Objective.** Create an order from an offer id and nothing else.
 
@@ -636,6 +636,10 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 ### TICKET-302 — Offer-to-order uniqueness
 
 **Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-111, TICKET-301
+
+> **Confirmed gap (ISSUE-009):** CodeAnt independently flagged the missing
+> reserve-before-POST on TICKET-301's `createOrder`. TICKET-301 was left as
+> read-only by design; this ticket is where the race gets fixed. Do not drop it.
 
 **Objective.** `offer_id → exactly one order`, enforced by the database.
 
