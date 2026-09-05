@@ -5,6 +5,7 @@
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
+    "@types/pg": "^8.23.1",
     "dotenv-cli": "^11.0.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
@@ -15,7 +16,9 @@
     "trpc-to-openapi": "^3.3.0",
     "zod": "^4.5.4",
     "zod-openapi": "^5.4.6",
-    "@repo/policy": "workspace:*"
+    "@repo/policy": "workspace:*",
+    "@repo/database": "workspace:*",
+    "drizzle-orm": "^0.45.2"
   },
   "scripts": {
     "check-types": "tsc --noEmit",
