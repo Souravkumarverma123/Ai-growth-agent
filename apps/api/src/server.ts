@@ -18,7 +18,7 @@ const openApiDocument = generateOpenApiDocument(serverRouter, {
 });
 
 if (env.NODE_ENV !== "prod") {
-  // ISSUE-005: a wildcard origin cannot be combined with credentialed
+  // ISSUE-006: a wildcard origin cannot be combined with credentialed
   // requests (the browser blocks it outright) — `origin: true` reflects the
   // requesting origin instead, which is what `credentials: true` requires.
   app.use(

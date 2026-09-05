@@ -69,7 +69,72 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-## ISSUE-005 — Dev-mode CORS (`origin: "*"`) rejects every credentialed client-side tRPC call from `apps/web`
+## ISSUE-007 — Concurrent `packages/trpc` test files race on the shared sibling test database
+
+Status: FIXED
+Severity: MEDIUM
+Found in: merge of TICKET-403/PR #15 and TICKET-404/PR #14 into TICKET-501/PR #16
+Date: 2026-09-05
+Violates invariant: none — a test-harness gap, not application behaviour.
+
+### Problem
+
+`packages/trpc/tests/audit-route.test.ts` (TICKET-404) and
+`packages/trpc/tests/merchant-policy-approval.test.ts` (TICKET-501) each hit
+the one physical sibling test database via `@repo/database/testing/db.ts`,
+and each truncates every table between its own tests. Vitest runs different
+test files within one package concurrently by default, and
+`packages/trpc/vitest.config.ts` never opted out of that — `packages/database`
+already had (TICKET-001/ISSUE-003's original harness fix set
+`fileParallelism: false` there), but nothing carried that same guard over to
+`packages/trpc` when it gained its first real-Postgres test file.
+
+Both PRs passed cleanly in isolation (each `pnpm --filter @repo/trpc test`
+run only ever saw its own single DB-touching test file). The race only
+existed once both files landed on the same branch together, which first
+happened resolving TICKET-501's merge conflict against `main` (both TICKET-403
+and TICKET-404 had already merged ahead of it).
+
+### Expected / Actual
+
+Expected: `pnpm test` at the repo root, run after this merge, green.
+Actual: intermittent `insert or update on table "audit_events" violates
+foreign key constraint "audit_events_session_id_negotiation_sessions_id_fk"`
+— one test file's `truncateAllTables()` wiped the `negotiation_sessions` row
+the other file had just inserted and was mid-way through using.
+
+### Root Cause
+
+`packages/trpc/vitest.config.ts` had no `fileParallelism: false`, so its two
+DB-touching test files ran concurrently against the one shared sibling
+database.
+
+### Fix
+
+Added the identical guard `packages/database/vitest.config.ts` already
+carries: `fileParallelism: false` in `packages/trpc/vitest.config.ts`, with a
+comment naming both files and the shared-database reason.
+
+### Regression Test
+
+No new test added — this is a harness-configuration fix, not application
+behavior, and the two existing test files (already real-Postgres,
+already exercising truncate-between-tests) are themselves the proof: re-ran
+`pnpm --filter @repo/trpc test` and the root `pnpm test` repeatedly after the
+fix with both files present, all green.
+
+### Related Ticket
+
+None single ticket — a cross-PR interaction between TICKET-403, TICKET-404 and TICKET-501.
+
+### Status History
+
+- 2026-09-05: OPEN — found resolving TICKET-501's merge conflict against `main`.
+- 2026-09-05: FIXED — `fileParallelism: false` added to `packages/trpc/vitest.config.ts`.
+
+---
+
+## ISSUE-006 — Dev-mode CORS (`origin: "*"`) rejects every credentialed client-side tRPC call from `apps/web`
 
 Status: FIXED
 Severity: MEDIUM
@@ -113,6 +178,77 @@ TICKET-501
 
 - 2026-09-05: OPEN
 - 2026-09-05: FIXED — dev CORS now reflects origin + allows credentials
+
+---
+
+## ISSUE-005 — TICKET-403's ledger-writer functions can't know *why* a hold is being released/reserved/committed
+
+Status: FIXED
+Severity: LOW
+Found in: TICKET-403
+Date: 2026-09-05
+Violates invariant: none — a design-completeness gap, not a broken invariant.
+
+### Problem
+
+TICKET-403 asks `reserveCampaignBudget` / `releaseCampaignHold` /
+`commitCampaignHold` (`packages/database/repositories/campaign-holds.ts`,
+built by TICKET-107/108) to each append exactly one ledger event
+(`HOLD_RESERVED` / `HOLD_RELEASED` / `HOLD_COMMITTED`) via `appendAuditEvent`
+(TICKET-401) in the same transaction as the hold's own state change. But the
+exact `eventType` / `fromState` / `toState` for a given call is not derivable
+from the hold row alone: `releaseCampaignHold` is called for three different
+real-world causes (buyer decline of a tier-2 offer, TTL expiry, payment
+failure), each a *different* transition in the frozen state machine
+(`packages/policy/contracts/state-machine.ts`) — `OFFER_PENDING
+--BUYER_DECLINES--> OPEN`, `EXPIRED --HOLD_RELEASED--> EXPIRED`, and
+`PAYMENT_FAILED --HOLD_RELEASED--> PAYMENT_FAILED` respectively — even though
+all three carry the identical `HOLD_RELEASED` reason code. No
+session-orchestration layer exists yet in this codebase to resolve "why" a
+release is happening, so the repository function itself has no way to pick
+the right transition on its own.
+
+### Expected / Actual
+
+Not a behavioural bug — no test failed. This is a design-completeness gap
+the ticket text itself flagged as "a real ambiguity" and explicitly invited a
+reasoned engineering call on, rather than a defect discovered after the
+fact.
+
+### Fix
+
+Extended the parameter lists of all three functions with a caller-supplied
+`ledger: CampaignHoldLedgerContext` (`sessionId`, `eventType`, `fromState`,
+`toState`, `reasonCode`, plus optional `payload` / `policyVersion` /
+`modelExplanation`) — mirroring how `appendAuditEvent` itself already takes
+these as plain params rather than deriving them. The repository stays dumb
+about *why* a transition is happening; the caller (today, each test's own
+fixture code; eventually the session-orchestration layer no ticket has built
+yet) supplies the exact transition. `campaignHoldId`, `campaignSpendMinor`
+and `offerId` are deliberately NOT part of the caller-supplied context —
+those always come from the hold row the call resolves, so the ledger amount
+can never diverge from the hold's real `amount_minor`.
+
+### Regression Test
+
+`packages/database/tests/campaign-hold-ledger.test.ts` — asserts every
+appended event carries the caller-supplied `eventType`/`fromState`/`toState`/
+`reasonCode` correctly, that `campaignHoldId`/`campaignSpendMinor`/`offerId`
+are always derived from the hold row, and that a full reserve→commit and
+reserve→release lifecycle's ledger events net to the same outstanding budget
+as `campaign_holds` itself.
+
+### Related Ticket
+
+TICKET-403 (found and resolved here)
+
+### Status History
+
+- 2026-09-05: OPEN — flagged by the ticket text itself as a genuine ambiguity
+  requiring an engineering call, not a blocking spec gap.
+- 2026-09-05: FIXED — `CampaignHoldLedgerContext` parameter added to all
+  three hold functions; caller supplies the transition, repository stays
+  pure I/O.
 
 ---
 
