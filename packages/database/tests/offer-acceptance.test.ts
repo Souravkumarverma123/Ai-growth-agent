@@ -143,12 +143,26 @@ describe("TICKET-111 — acceptOffer (TTL, single-use, basket binding)", () => {
       expect(row!.consumedAt).toBeNull();
     });
 
-    it("refuses exactly at the expiry instant", async () => {
+    it("accepts at exactly the expiry instant — the boundary is inclusive", async () => {
       const expiresAt = new Date();
       const offerId = await seedOffer({ index: 0, expiresAt });
 
       const db = await getTestDb();
       const result = await acceptOffer(db, { offerId, acceptedBasket: fixtureBasket(), now: expiresAt });
+
+      expect(result.accepted).toBe(true);
+    });
+
+    it("refuses one millisecond past the expiry instant", async () => {
+      const expiresAt = new Date();
+      const offerId = await seedOffer({ index: 0, expiresAt });
+
+      const db = await getTestDb();
+      const result = await acceptOffer(db, {
+        offerId,
+        acceptedBasket: fixtureBasket(),
+        now: new Date(expiresAt.getTime() + 1),
+      });
 
       expect(result).toEqual({ accepted: false, reasonCode: "OFFER_EXPIRED" });
     });
@@ -259,6 +273,30 @@ describe("TICKET-111 — acceptOffer (TTL, single-use, basket binding)", () => {
       });
 
       expect(result).toEqual({ accepted: false, reasonCode: "BASKET_MISMATCH" });
+    });
+
+    it("accepts when the commitment set matches but is listed in a different order", async () => {
+      const now = new Date();
+      const offerId = await seedOffer({
+        index: 0,
+        basket: fixtureBasket({ commitments: ["PREPAID", "NON_RETURNABLE"] }),
+        expiresAt: new Date(now.getTime() + 600_000),
+      });
+
+      const db = await getTestDb();
+      const result = await acceptOffer(db, {
+        offerId,
+        // Same set, reversed order — commitments carry no meaningful order
+        // of their own (see evaluateOfferAcceptance's basketsMatch), so this
+        // must accept, not be misreported as OFFER_ALREADY_CONSUMED.
+        acceptedBasket: fixtureBasket({ commitments: ["NON_RETURNABLE", "PREPAID"] }),
+        now,
+      });
+
+      expect(result.accepted).toBe(true);
+      if (result.accepted) {
+        expect(result.offer.consumedAt).not.toBeNull();
+      }
     });
   });
 

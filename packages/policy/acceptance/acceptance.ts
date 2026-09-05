@@ -117,9 +117,13 @@ export function evaluateOfferAcceptance(
   }
 
   // Perishable: an offer minted with expiresAt = mint time + offerTtlSeconds
-  // (TICKET-110, PRD §10: 600 s) is gone the instant `now` reaches that
-  // instant, regardless of anything else about it.
-  if (now.getTime() >= offer.expiresAt.getTime()) {
+  // (TICKET-110, PRD §10: 600 s) is gone once `now` passes that instant.
+  // Strict `>`, not `>=` — matches the frozen state-machine's own
+  // `TTL_ELAPSED` guard (contracts/state-machine.ts: `"now > expiresAt"`,
+  // enforced identically in `resolveTtlElapsedTransition`), so this
+  // function and the transition resolver can never disagree about whether
+  // the exact expiry instant itself already counts as expired.
+  if (now.getTime() > offer.expiresAt.getTime()) {
     return { accepted: false, reasonCode: "OFFER_EXPIRED" };
   }
 

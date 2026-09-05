@@ -24,7 +24,7 @@ import type { SelectOffer } from "../models/offer";
  *
  * The three refusals fold into that one statement's `WHERE` clause:
  *   - `consumed_at IS NULL`  — unreplayable (`OFFER_ALREADY_CONSUMED`)
- *   - `expires_at > $now`    — perishable (`OFFER_EXPIRED`)
+ *   - `expires_at >= $now`   — perishable (`OFFER_EXPIRED`)
  *   - currency/lines/commitments match — unreassignable (`BASKET_MISMATCH`)
  *
  * The basket predicate is NOT a single `basket = $acceptedBasket::jsonb`:
@@ -211,13 +211,18 @@ export async function acceptOffer(
   return database.transaction(async (tx): Promise<AcceptOfferResult> => {
     // The single atomic compare-and-set. Only a caller whose accept lands
     // while the offer is still unconsumed, unexpired, and basket-exact can
-    // ever see a row come back here.
+    // ever see a row come back here. `expires_at >= now` (inclusive), not
+    // `>` — matches the frozen state-machine's `TTL_ELAPSED` guard
+    // (contracts/state-machine.ts: `"now > expiresAt"`, i.e. NOT yet
+    // expired while `now <= expiresAt`), so this CAS and
+    // `evaluateOfferAcceptance`'s own boundary can never disagree about
+    // whether the exact expiry instant itself still counts as valid.
     const updateResult = await tx.execute<OfferRow>(sql`
       UPDATE offers
       SET consumed_at = ${nowIso}
       WHERE id = ${offerId}
         AND consumed_at IS NULL
-        AND expires_at > ${nowIso}
+        AND expires_at >= ${nowIso}
         AND basket->>'currency' = ${acceptedBasket.currency}
         AND basket->'lines' = ${acceptedLinesJson}::jsonb
         AND COALESCE(
