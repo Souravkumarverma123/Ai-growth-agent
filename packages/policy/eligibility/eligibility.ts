@@ -149,7 +149,8 @@ function requireSkuPolicy(skuPoliciesById: Map<string, SkuPolicy>, skuId: string
  */
 function basketHasNegotiableSku(basket: Basket, skuCatalogue: readonly SkuPolicy[]): boolean {
   const skuPoliciesById = new Map(skuCatalogue.map((sku) => [sku.skuId, sku] as const));
-  return basket.lines.some((line) => requireSkuPolicy(skuPoliciesById, line.skuId).negotiable);
+  const basketSkuPolicies = basket.lines.map((line) => requireSkuPolicy(skuPoliciesById, line.skuId));
+  return basketSkuPolicies.some((skuPolicy) => skuPolicy.negotiable);
 }
 
 // ---------------------------------------------------------------------------
