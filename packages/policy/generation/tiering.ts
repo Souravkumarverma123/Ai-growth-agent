@@ -139,7 +139,12 @@ function markCandidate(
     clearsSlowMoving: candidate.clearsSlowMoving,
   };
 
-  if (candidate.contributionDeltaMinor >= 0) {
+  const contributionDeltaMinor = requireSafeInteger(
+    candidate.contributionDeltaMinor,
+    "contributionDeltaMinor",
+  );
+
+  if (contributionDeltaMinor >= 0) {
     return {
       ...shared,
       tier: 1,
