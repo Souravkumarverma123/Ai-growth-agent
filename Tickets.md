@@ -847,7 +847,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-501 — Merchant policy configuration and approval
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-003, TICKET-006
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-003, TICKET-006
 
 **Objective.** The screen where the merchant delegates authority.
 

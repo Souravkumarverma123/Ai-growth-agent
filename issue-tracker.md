@@ -69,6 +69,53 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-005 — Dev-mode CORS (`origin: "*"`) rejects every credentialed client-side tRPC call from `apps/web`
+
+Status: FIXED
+Severity: MEDIUM
+Found in: TICKET-501
+Date: 2026-09-05
+Violates invariant: none
+
+### Problem
+
+`apps/web/trpc/create-client.ts` sends every request with `credentials: "include"` (needed so browser-side tRPC calls carry cookies). `apps/api/src/server.ts`'s dev-mode CORS middleware was configured with `cors({ origin: "*" })`. A wildcard `Access-Control-Allow-Origin` combined with a credentialed request is rejected by the browser itself (not a server-side 4xx — the fetch never even completes), regardless of what the server returns.
+
+### Expected
+
+The new TICKET-501 merchant policy page (the first *client-side* interactive tRPC consumer in this codebase — every prior usage was a server component calling `api.*.query()` from Node, which never goes through browser CORS at all) should be able to call `merchant.getPolicy` / `merchant.approvePolicy` / `merchant.setNegotiationEnabled` from the browser and round-trip against the real API + Postgres.
+
+### Actual
+
+Every client-side call failed in the browser console with: `Access to fetch at 'http://localhost:8000/trpc/merchant.getPolicy?...' from origin 'http://localhost:3000' has been blocked by CORS policy: The value of the 'Access-Control-Allow-Origin' header ... must not be the wildcard '*' when the request's credentials mode is 'include'.` The policy form never loaded in-browser. Verified independently via `curl` (bypasses browser CORS enforcement entirely) that `getPolicy` / `approvePolicy` / `setNegotiationEnabled` all work correctly against the real Postgres instance — so the bug is purely transport-layer CORS configuration, not the procedures implemented in this ticket.
+
+### Root Cause
+
+Leftover dev CORS config from the template this repo was scaffolded from (`apps/api` is outside TICKET-501's own affected packages `apps/web` / `packages/trpc`, but the misconfiguration blocks any browser-based client of the API, present or future, the moment a client component tries to use `trpc.*.useQuery` / `useMutation` instead of the server-side proxy client).
+
+### Impact
+
+Blocked in-browser verification of the merchant policy screen — the literal DoD step "start the dev server ... and check the new page renders and the approve/kill-switch actions actually round-trip." Would have silently blocked every future client-side tRPC consumer too.
+
+### Fix
+
+Applied. `apps/api/src/server.ts`: dev-mode CORS changed from `cors({ origin: "*" })` to `cors({ origin: true, credentials: true })` — `origin: true` reflects the requesting origin (required once credentials are involved; a wildcard is invalid alongside them), and `credentials: true` emits the `Access-Control-Allow-Credentials` header the browser also requires. Gated the same as before (`NODE_ENV !== "prod"`), so no production behavior changed.
+
+### Regression Test
+
+None added. This is transport/dev-tooling configuration, not application behavior — the existing `router-boot.test.ts` doesn't exercise HTTP/CORS at all, and standing up a browser-CORS test harness for one config line isn't proportionate. Re-verified manually: the merchant policy page loads, approves, and flips the kill switch against the real dev API + Postgres after the fix.
+
+### Related Ticket
+
+TICKET-501
+
+### Status History
+
+- 2026-09-05: OPEN
+- 2026-09-05: FIXED — dev CORS now reflects origin + allows credentials
+
+---
+
 ## ISSUE-004 — The "recommended" single-CTE-statement campaign-budget reservation over-admits under real concurrency
 
 Status: FIXED

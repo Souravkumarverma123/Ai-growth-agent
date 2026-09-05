@@ -457,6 +457,9 @@ importers:
 
   packages/trpc:
     dependencies:
+      '@repo/database':
+        specifier: workspace:*
+        version: link:../database
       '@repo/policy':
         specifier: workspace:*
         version: link:../policy
@@ -466,6 +469,12 @@ importers:
       '@trpc/server':
         specifier: ^11.18.0
         version: 11.18.0(typescript@5.9.3)
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
       trpc-to-openapi:
         specifier: ^3.3.0
         version: 3.3.0(@trpc/server@11.18.0(typescript@5.9.3))(zod-openapi@5.4.6(zod@4.5.4))(zod@4.5.4)
@@ -482,6 +491,9 @@ importers:
       '@repo/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
       dotenv-cli:
         specifier: ^11.0.0
         version: 11.0.0
