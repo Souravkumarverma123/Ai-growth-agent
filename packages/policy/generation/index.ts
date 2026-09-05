@@ -4,3 +4,4 @@
  * CONTRACTS.md §2 (no I/O in `packages/policy`).
  */
 export * from "./candidates";
+export * from "./tiering";
