@@ -752,15 +752,26 @@ export const negotiationRouter = router({
         const { policy } = await loadMerchantNegotiationContext(tx, session.merchantId);
         if (policy.autonomousPaymentExecution) {
           const paymentTransition = resolvePaymentInitiationTransition(true);
-          await appendAuditEvent(
-            tx,
-            auditParamsFromTransition(paymentTransition, {
+          await appendAuditEvent(tx, {
+            ...auditParamsFromTransition(paymentTransition, {
               sessionId: session.id,
               payload: { offerId: offerBeforeAccept.id },
               policyVersion: session.policyVersion,
               offerId: offerBeforeAccept.id,
             }),
-          );
+            // paymentTransition's own from/to are ACCEPTED->ACCEPTED — the
+            // frozen state machine's only row for this reason code — but this
+            // gate deliberately fires BEFORE the offer is ever accepted (see
+            // comment above), so the session never actually leaves
+            // OFFER_PENDING. Recording fromState/toState as ACCEPTED here
+            // would assert a transition that never happened and never gets
+            // persisted, leaving the ledger permanently out of sync with
+            // negotiation_sessions.state. Overriding both to OFFER_PENDING
+            // keeps eventType/reasonCode sourced from the real resolver while
+            // the ledger stays honest about which state this fired in.
+            fromState: "OFFER_PENDING",
+            toState: "OFFER_PENDING",
+          });
           return { blocked: true, reasonCode: paymentTransition.reasonCode };
         }
 
