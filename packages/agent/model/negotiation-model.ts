@@ -56,7 +56,7 @@ export type ConversationTurn = z.infer<typeof conversationTurnSchema>;
  */
 export interface NegotiationRoundInput {
   readonly sessionId: string;
-  /** 1-based, matching `NegotiationSession.roundIndex` (CONTRACTS.md §5.3). */
+  /** 1-based model round; persisted `NegotiationSession.roundIndex` starts at 0. */
   readonly roundIndex: number;
   /** This round's engine-authored, already-unlocked candidate set. */
   readonly candidates: readonly Candidate[];
