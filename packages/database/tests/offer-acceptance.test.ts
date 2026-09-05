@@ -143,12 +143,26 @@ describe("TICKET-111 — acceptOffer (TTL, single-use, basket binding)", () => {
       expect(row!.consumedAt).toBeNull();
     });
 
-    it("refuses exactly at the expiry instant", async () => {
+    it("accepts at exactly the expiry instant — the boundary is inclusive", async () => {
       const expiresAt = new Date();
       const offerId = await seedOffer({ index: 0, expiresAt });
 
       const db = await getTestDb();
       const result = await acceptOffer(db, { offerId, acceptedBasket: fixtureBasket(), now: expiresAt });
+
+      expect(result.accepted).toBe(true);
+    });
+
+    it("refuses one millisecond past the expiry instant", async () => {
+      const expiresAt = new Date();
+      const offerId = await seedOffer({ index: 0, expiresAt });
+
+      const db = await getTestDb();
+      const result = await acceptOffer(db, {
+        offerId,
+        acceptedBasket: fixtureBasket(),
+        now: new Date(expiresAt.getTime() + 1),
+      });
 
       expect(result).toEqual({ accepted: false, reasonCode: "OFFER_EXPIRED" });
     });

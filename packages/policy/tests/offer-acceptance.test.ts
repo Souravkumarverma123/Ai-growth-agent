@@ -51,11 +51,26 @@ describe("evaluateOfferAcceptance", () => {
   });
 
   describe("OFFER_EXPIRED — past 600s", () => {
-    it("refuses at exactly the expiry instant", () => {
+    // Matches the frozen state-machine's own TTL_ELAPSED guard
+    // (contracts/state-machine.ts: "now > expiresAt") — expired only
+    // strictly after the instant, never at it. This function's CAS
+    // counterpart (packages/database/repositories/offers.ts's acceptOffer)
+    // uses the same inclusive-at-the-boundary rule so the two can never
+    // disagree about whether the exact expiry instant itself is still valid.
+    it("accepts at exactly the expiry instant — the boundary is inclusive", () => {
       const result = evaluateOfferAcceptance({
         offer: mintedOffer(),
         acceptedBasket: basket(),
         now: EXPIRES_AT,
+      });
+      expect(result).toEqual({ accepted: true });
+    });
+
+    it("refuses one millisecond past the expiry instant", () => {
+      const result = evaluateOfferAcceptance({
+        offer: mintedOffer(),
+        acceptedBasket: basket(),
+        now: new Date(EXPIRES_AT.getTime() + 1),
       });
       expect(result).toEqual({ accepted: false, reasonCode: "OFFER_EXPIRED" });
     });
@@ -69,7 +84,7 @@ describe("evaluateOfferAcceptance", () => {
       expect(result).toEqual({ accepted: false, reasonCode: "OFFER_EXPIRED" });
     });
 
-    it("accepts one millisecond before expiry — the boundary is exclusive", () => {
+    it("accepts one millisecond before expiry", () => {
       const result = evaluateOfferAcceptance({
         offer: mintedOffer(),
         acceptedBasket: basket(),
