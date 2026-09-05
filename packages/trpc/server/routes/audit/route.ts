@@ -1,12 +1,13 @@
-import { TRPCError } from "@trpc/server";
+import { getAuditEventsForSession } from "@repo/database/repositories/audit-events";
+import { verifyChain, type ChainEvent } from "@repo/policy";
 
 import { z } from "../../schema";
 import { publicProcedure, router } from "../../trpc";
 import { generatePath } from "../../utils/path-generator";
 
 /**
- * FROZEN CONTRACT — PRD.md §13. Signatures only; bodies are stubs for Phase 0
- * (TICKET-006). Implementations land in TICKET-404.
+ * FROZEN CONTRACT — PRD.md §13. Signatures were fixed in Phase 0
+ * (TICKET-006); bodies are implemented here (TICKET-404).
  *
  * Read-only by construction: the ledger is append-only, so no write procedure
  * exists here or may be added.
@@ -14,13 +15,6 @@ import { generatePath } from "../../utils/path-generator";
 
 const TAGS = ["Audit"];
 const getPath = generatePath("/audit");
-
-const notImplemented = (ticket: string) => {
-  throw new TRPCError({
-    code: "NOT_IMPLEMENTED",
-    message: `Stubbed during Phase 0 contract freeze. Implemented by ${ticket}.`,
-  });
-};
 
 const auditEventViewSchema = z.object({
   eventId: z.string(),
@@ -55,7 +49,33 @@ export const auditRouter = router({
     .meta({ openapi: { method: "GET", path: getPath("/session/{sessionId}"), tags: TAGS } })
     .input(z.object({ sessionId: z.string() }))
     .output(z.object({ events: z.array(auditEventViewSchema) }))
-    .query(async () => notImplemented("TICKET-404")),
+    .query(async ({ input, ctx }) => {
+      const events = await getAuditEventsForSession(ctx.db, input.sessionId);
+
+      return {
+        events: events.map((event) => ({
+          eventId: event.id,
+          sequence: event.sequence,
+          timestamp: event.timestamp.toISOString(),
+          eventType: event.eventType,
+          fromState: event.fromState,
+          toState: event.toState,
+
+          reasonCode: event.reasonCode,
+          payload: event.payload,
+
+          policyVersion: event.policyVersion,
+          offerId: event.offerId,
+          campaignSpendMinor: event.campaignSpendMinor,
+
+          modelExplanation: event.modelExplanation,
+          modelExplanationIsAuthoritative: false as const,
+
+          prevHash: event.prevHash,
+          eventHash: event.eventHash,
+        })),
+      };
+    }),
 
   /**
    * Chain verification. Note the honest limitation: the chain is self-anchored,
@@ -73,5 +93,15 @@ export const auditRouter = router({
         selfAnchored: z.literal(true),
       }),
     )
-    .query(async () => notImplemented("TICKET-404")),
+    .query(async ({ input, ctx }) => {
+      const events = await getAuditEventsForSession(ctx.db, input.sessionId);
+      const result = verifyChain(events as unknown as ChainEvent[]);
+
+      return {
+        valid: result.valid,
+        eventCount: result.eventCount,
+        brokenAtSequence: result.valid ? null : result.brokenAtSequence,
+        selfAnchored: true as const,
+      };
+    }),
 });

@@ -821,7 +821,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-404 — Ledger read API and chain verification endpoint
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-401
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-401
 
 **Objective.** Let the console and a judge read and verify the chain.
 
