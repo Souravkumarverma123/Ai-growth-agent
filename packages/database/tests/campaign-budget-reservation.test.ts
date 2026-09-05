@@ -71,7 +71,7 @@ async function insertSessionAndOffer(params: {
   merchantId: string;
   index: number;
   shortfallMinor: number;
-}): Promise<string> {
+}): Promise<{ offerId: string; sessionId: string }> {
   const db = await getTestDb();
   const { merchantId, index, shortfallMinor } = params;
 
@@ -107,7 +107,18 @@ async function insertSessionAndOffer(params: {
     })
     .returning({ id: offersTable.id });
 
-  return offer!.id;
+  return { offerId: offer!.id, sessionId: session!.id };
+}
+
+/** TICKET-403 — the ledger entry a `BUDGET_RESERVED` reservation carries (PRD §6.5, §13.1). */
+function reserveLedgerFor(sessionId: string) {
+  return {
+    sessionId,
+    eventType: "BUDGET_RESERVED" as const,
+    fromState: "OFFER_PENDING" as const,
+    toState: "OFFER_PENDING" as const,
+    reasonCode: "HOLD_RESERVED" as const,
+  };
 }
 
 async function sumOutstandingMinor(merchantId: string): Promise<number> {
@@ -149,7 +160,7 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
         perDealCapMinor: PER_DEAL_CAP_MINOR,
       });
 
-      const offerIds = await Promise.all(
+      const offers = await Promise.all(
         Array.from({ length: ATTEMPT_COUNT }, (_, index) =>
           insertSessionAndOffer({ merchantId, index, shortfallMinor: RESERVATION_AMOUNT_MINOR }),
         ),
@@ -160,7 +171,7 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
       // the real mint flow will (pure check first, DB call only if it
       // passes) — the point of this test is the campaign-budget race, not
       // the per-deal cap, which is covered separately below.
-      const perDealDecisions = offerIds.map(() =>
+      const perDealDecisions = offers.map(() =>
         evaluatePerDealCap(RESERVATION_AMOUNT_MINOR, PER_DEAL_CAP_MINOR),
       );
       expect(perDealDecisions.every((decision) => decision.allowed)).toBe(true);
@@ -169,12 +180,13 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
       const expiresAt = new Date(Date.now() + 600_000);
 
       const results = await Promise.all(
-        offerIds.map((offerId) =>
+        offers.map(({ offerId, sessionId }) =>
           reserveCampaignBudget(db, {
             merchantId,
             offerId,
             amountMinor: RESERVATION_AMOUNT_MINOR,
             expiresAt,
+            ledger: reserveLedgerFor(sessionId),
           }),
         ),
       );
@@ -263,7 +275,11 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
     const decision = evaluatePerDealCap(SHORTFALL_MINOR, PER_DEAL_CAP_MINOR);
     expect(decision.allowed).toBe(true);
 
-    const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: SHORTFALL_MINOR });
+    const { offerId, sessionId } = await insertSessionAndOffer({
+      merchantId,
+      index: 0,
+      shortfallMinor: SHORTFALL_MINOR,
+    });
     const db = await getTestDb();
 
     const result = await reserveCampaignBudget(db, {
@@ -271,6 +287,7 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
       offerId,
       amountMinor: SHORTFALL_MINOR,
       expiresAt: new Date(Date.now() + 600_000),
+      ledger: reserveLedgerFor(sessionId),
     });
 
     // The per-deal cap check passed (both codes fire independently), but the
@@ -295,7 +312,11 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
         campaignBudgetTotalMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
         perDealCapMinor: PER_DEAL_CAP_MINOR,
       });
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 10_000 });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: 10_000,
+      });
       const db = await getTestDb();
 
       await expect(
@@ -304,6 +325,7 @@ describe("TICKET-107 — campaign budget accounting with atomic reservation", ()
           offerId,
           amountMinor,
           expiresAt: new Date(Date.now() + 600_000),
+          ledger: reserveLedgerFor(sessionId),
         }),
       ).rejects.toThrow(/amountMinor must be a positive integer/);
 

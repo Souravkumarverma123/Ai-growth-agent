@@ -277,7 +277,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-104 — Tier assignment and feasible-set marking
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-102, TICKET-103
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-102, TICKET-103
 
 **Objective.** One search, two zones: mark each candidate Tier 1 or Tier 2 with its required shortfall.
 
@@ -799,7 +799,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-403 — Campaign hold events in the ledger
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-108, TICKET-401
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-108, TICKET-401
 
 **Objective.** Make hold movement visible in the audit stream.
 

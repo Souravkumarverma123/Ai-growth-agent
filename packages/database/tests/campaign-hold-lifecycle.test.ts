@@ -16,6 +16,7 @@ import {
   commitCampaignHold,
   releaseCampaignHold,
   reserveCampaignBudget,
+  type CampaignHoldLedgerContext,
 } from "../repositories/campaign-holds";
 
 /**
@@ -27,6 +28,16 @@ import {
  * row, a negotiation_sessions + offers row per hold, then
  * `reserveCampaignBudget` to actually create the `RESERVED` hold under test.
  * CONTRACTS.md §8 — do not mock the database; use the real one.
+ *
+ * TICKET-403 — every reserve/release/commit call below now also supplies the
+ * `ledger` context the ticket added to those functions (see the module
+ * comment in `../repositories/campaign-holds.ts`). This file's own point
+ * (hold mechanics, not ledger content) is unaffected: the `reserveLedgerFor`
+ * / `releaseLedgerFor` / `commitLedgerFor` helpers below just supply a
+ * plausible, frozen-state-machine-accurate ledger context so these calls
+ * still type-check and exercise the real append path. The ledger's own
+ * correctness (amounts, session read-back) is this ticket's separate test,
+ * `campaign-hold-ledger.test.ts`.
  */
 
 const DUMMY_SKU_ID = randomUUID();
@@ -36,6 +47,67 @@ function fixtureBasket(unitPriceMinor: number): Basket {
     currency: "INR",
     commitments: [],
     lines: [{ skuId: DUMMY_SKU_ID, quantity: 1, unitPriceMinor }],
+  };
+}
+
+/** TICKET-403 — the ledger entry a `BUDGET_RESERVED` reservation carries. */
+function reserveLedgerFor(sessionId: string): CampaignHoldLedgerContext {
+  return {
+    sessionId,
+    eventType: "BUDGET_RESERVED",
+    fromState: "OFFER_PENDING",
+    toState: "OFFER_PENDING",
+    reasonCode: "HOLD_RESERVED",
+  };
+}
+
+type ReleaseCause = "decline" | "expiry" | "payment-failure";
+
+/**
+ * TICKET-403 — the ledger entry each of the three real-world release causes
+ * carries, per the frozen state machine (`packages/policy/contracts/state-machine.ts`):
+ * a tier-2 buyer decline moves OFFER_PENDING -> OPEN; TTL expiry and payment
+ * failure are same-state self-loops on EXPIRED / PAYMENT_FAILED. All three
+ * carry the identical `HOLD_RELEASED` reason code — only `eventType` and
+ * `fromState`/`toState` differ.
+ */
+function releaseLedgerFor(cause: ReleaseCause, sessionId: string): CampaignHoldLedgerContext {
+  switch (cause) {
+    case "decline":
+      return {
+        sessionId,
+        eventType: "BUYER_DECLINES",
+        fromState: "OFFER_PENDING",
+        toState: "OPEN",
+        reasonCode: "HOLD_RELEASED",
+      };
+    case "expiry":
+      return {
+        sessionId,
+        eventType: "HOLD_RELEASED",
+        fromState: "EXPIRED",
+        toState: "EXPIRED",
+        reasonCode: "HOLD_RELEASED",
+      };
+    case "payment-failure":
+      return {
+        sessionId,
+        eventType: "HOLD_RELEASED",
+        fromState: "PAYMENT_FAILED",
+        toState: "PAYMENT_FAILED",
+        reasonCode: "HOLD_RELEASED",
+      };
+  }
+}
+
+/** TICKET-403 — the ledger entry a `HOLD_COMMITTED` commit carries (SETTLED -> SETTLED self-loop). */
+function commitLedgerFor(sessionId: string): CampaignHoldLedgerContext {
+  return {
+    sessionId,
+    eventType: "HOLD_COMMITTED",
+    fromState: "SETTLED",
+    toState: "SETTLED",
+    reasonCode: "HOLD_COMMITTED",
   };
 }
 
@@ -65,7 +137,7 @@ async function insertSessionAndOffer(params: {
   merchantId: string;
   index: number;
   shortfallMinor: number;
-}): Promise<string> {
+}): Promise<{ offerId: string; sessionId: string }> {
   const db = await getTestDb();
   const { merchantId, index, shortfallMinor } = params;
 
@@ -99,7 +171,7 @@ async function insertSessionAndOffer(params: {
     })
     .returning({ id: offersTable.id });
 
-  return offer!.id;
+  return { offerId: offer!.id, sessionId: session!.id };
 }
 
 async function sumOutstandingMinor(merchantId: string): Promise<number> {
@@ -120,6 +192,7 @@ async function sumOutstandingMinor(merchantId: string): Promise<number> {
 async function reserveHold(params: {
   merchantId: string;
   offerId: string;
+  sessionId: string;
   amountMinor: number;
 }): Promise<string> {
   const db = await getTestDb();
@@ -128,6 +201,7 @@ async function reserveHold(params: {
     offerId: params.offerId,
     amountMinor: params.amountMinor,
     expiresAt: new Date(Date.now() + 600_000),
+    ledger: reserveLedgerFor(params.sessionId),
   });
   if (!result.reserved) {
     throw new Error(`test fixture: reservation unexpectedly failed (${result.reasonCode})`);
@@ -146,12 +220,12 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
   describe("full lifecycle across all three terminal release paths, plus commit", () => {
     it.each([
-      ["buyer decline of a tier-2 offer"],
-      ["TTL expiry"],
-      ["payment failure"],
-    ])(
+      ["buyer decline of a tier-2 offer", "decline"],
+      ["TTL expiry", "expiry"],
+      ["payment failure", "payment-failure"],
+    ] as const)(
       "release restores `available` — simulating %s",
-      async () => {
+      async (_label, cause) => {
         const CAMPAIGN_BUDGET_TOTAL_MINOR = 100_000; // ₹1,000
         const PER_DEAL_CAP_MINOR = 50_000;
         const AMOUNT_MINOR = 30_000; // ₹300
@@ -161,24 +235,30 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
           perDealCapMinor: PER_DEAL_CAP_MINOR,
         });
 
-        const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
-        const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+        const { offerId, sessionId } = await insertSessionAndOffer({
+          merchantId,
+          index: 0,
+          shortfallMinor: AMOUNT_MINOR,
+        });
+        const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: AMOUNT_MINOR });
 
         // While RESERVED, a second reservation for an amount that only fits
         // if the first is released must fail.
-        const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+        const offer2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
         const db = await getTestDb();
         const blockedAttempt = await reserveCampaignBudget(db, {
           merchantId,
-          offerId: offerId2,
+          offerId: offer2.offerId,
           amountMinor: CAMPAIGN_BUDGET_TOTAL_MINOR - AMOUNT_MINOR + 1, // exceeds what's left
           expiresAt: new Date(Date.now() + 600_000),
+          ledger: reserveLedgerFor(offer2.sessionId),
         });
         expect(blockedAttempt.reserved).toBe(false);
 
         // The release, regardless of which real-world cause triggered it
-        // (decline / expiry / payment failure), is the same DB-level call.
-        const releaseResult = await releaseCampaignHold(db, holdId);
+        // (decline / expiry / payment failure), is the same DB-level call —
+        // only the ledger context passed in differs (TICKET-403).
+        const releaseResult = await releaseCampaignHold(db, holdId, releaseLedgerFor(cause, sessionId));
         expect(releaseResult.resolved).toBe(true);
         if (releaseResult.resolved) {
           expect(releaseResult.hold.state).toBe("RELEASED");
@@ -187,12 +267,17 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
         // `available` is restored: a fresh reservation for the full budget
         // now succeeds again, where it wouldn't have while RESERVED.
-        const offerId3 = await insertSessionAndOffer({ merchantId, index: 2, shortfallMinor: CAMPAIGN_BUDGET_TOTAL_MINOR });
+        const offer3 = await insertSessionAndOffer({
+          merchantId,
+          index: 2,
+          shortfallMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
+        });
         const afterReleaseResult = await reserveCampaignBudget(db, {
           merchantId,
-          offerId: offerId3,
+          offerId: offer3.offerId,
           amountMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
           expiresAt: new Date(Date.now() + 600_000),
+          ledger: reserveLedgerFor(offer3.sessionId),
         });
         expect(afterReleaseResult.reserved).toBe(true);
 
@@ -212,11 +297,15 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
       perDealCapMinor: PER_DEAL_CAP_MINOR,
     });
 
-    const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
-    const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+    const { offerId, sessionId } = await insertSessionAndOffer({
+      merchantId,
+      index: 0,
+      shortfallMinor: AMOUNT_MINOR,
+    });
+    const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: AMOUNT_MINOR });
 
     const db = await getTestDb();
-    const commitResult = await commitCampaignHold(db, holdId);
+    const commitResult = await commitCampaignHold(db, holdId, commitLedgerFor(sessionId));
     expect(commitResult.resolved).toBe(true);
     if (commitResult.resolved) {
       expect(commitResult.hold.state).toBe("COMMITTED");
@@ -229,12 +318,13 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
     // A subsequent reservation that would only fit if the committed amount
     // were released must still fail — commit is not a release.
-    const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+    const offer2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
     const followupResult = await reserveCampaignBudget(db, {
       merchantId,
-      offerId: offerId2,
+      offerId: offer2.offerId,
       amountMinor: CAMPAIGN_BUDGET_TOTAL_MINOR - AMOUNT_MINOR + 1,
       expiresAt: new Date(Date.now() + 600_000),
+      ledger: reserveLedgerFor(offer2.sessionId),
     });
     expect(followupResult.reserved).toBe(false);
   });
@@ -256,8 +346,12 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
       // Reserve, then simulate an abandoned offer by moving expires_at into
       // the past directly — no `releaseCampaignHold` call, so the row stays
       // RESERVED. Nothing in this codebase currently sweeps it to RELEASED.
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
-      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: AMOUNT_MINOR,
+      });
+      const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: AMOUNT_MINOR });
       await db
         .update(campaignHoldsTable)
         .set({ expiresAt: new Date(Date.now() - 1_000) })
@@ -265,12 +359,13 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
       // A second reservation that would only fit if the first hold's amount
       // were excluded must still succeed, because that first hold is expired.
-      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const offer2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
       const secondResult = await reserveCampaignBudget(db, {
         merchantId,
-        offerId: offerId2,
+        offerId: offer2.offerId,
         amountMinor: AMOUNT_MINOR,
         expiresAt: new Date(Date.now() + 600_000),
+        ledger: reserveLedgerFor(offer2.sessionId),
       });
       expect(secondResult.reserved).toBe(true);
 
@@ -300,20 +395,25 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
       // Reserve, then expire it in place (no release), exactly as in the
       // "excluded from `available`" case above.
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
-      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: AMOUNT_MINOR,
+      });
+      const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: AMOUNT_MINOR });
       await db
         .update(campaignHoldsTable)
         .set({ expiresAt: new Date(Date.now() - 1_000) })
         .where(eq(campaignHoldsTable.id, holdId));
 
       // A later reservation reuses the expired hold's excluded budget.
-      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const offer2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
       const secondResult = await reserveCampaignBudget(db, {
         merchantId,
-        offerId: offerId2,
+        offerId: offer2.offerId,
         amountMinor: AMOUNT_MINOR,
         expiresAt: new Date(Date.now() + 600_000),
+        ledger: reserveLedgerFor(offer2.sessionId),
       });
       expect(secondResult.reserved).toBe(true);
 
@@ -322,7 +422,7 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
       // would move it into the unconditionally-counted COMMITTED state,
       // double-counting the same budget slot the second reservation already
       // claimed.
-      const commitResult = await commitCampaignHold(db, holdId);
+      const commitResult = await commitCampaignHold(db, holdId, commitLedgerFor(sessionId));
       expect(commitResult.resolved).toBe(false);
 
       const [hold] = await db
@@ -347,8 +447,12 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
       const db = await getTestDb();
 
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: AMOUNT_MINOR });
-      const holdId = await reserveHold({ merchantId, offerId, amountMinor: AMOUNT_MINOR });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: AMOUNT_MINOR,
+      });
+      const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: AMOUNT_MINOR });
       await db
         .update(campaignHoldsTable)
         .set({ expiresAt: new Date(Date.now() - 1_000) })
@@ -359,14 +463,15 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
       // row reserveCampaignBudget locks, these run as two fully
       // unsynchronized transactions and can both succeed — the exact race
       // this test guards against.
-      const offerId2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
+      const offer2 = await insertSessionAndOffer({ merchantId, index: 1, shortfallMinor: AMOUNT_MINOR });
       const [commitResult, reserveResult] = await Promise.all([
-        commitCampaignHold(db, holdId),
+        commitCampaignHold(db, holdId, commitLedgerFor(sessionId)),
         reserveCampaignBudget(db, {
           merchantId,
-          offerId: offerId2,
+          offerId: offer2.offerId,
           amountMinor: AMOUNT_MINOR,
           expiresAt: new Date(Date.now() + 600_000),
+          ledger: reserveLedgerFor(offer2.sessionId),
         }),
       ]);
 
@@ -394,13 +499,17 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
           campaignBudgetTotalMinor: 100_000,
           perDealCapMinor: 50_000,
         });
-        const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 20_000 });
-        const holdId = await reserveHold({ merchantId, offerId, amountMinor: 20_000 });
+        const { offerId, sessionId } = await insertSessionAndOffer({
+          merchantId,
+          index: 0,
+          shortfallMinor: 20_000,
+        });
+        const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: 20_000 });
 
         const db = await getTestDb();
         const [resultA, resultB] = await Promise.all([
-          releaseCampaignHold(db, holdId),
-          releaseCampaignHold(db, holdId),
+          releaseCampaignHold(db, holdId, releaseLedgerFor("decline", sessionId)),
+          releaseCampaignHold(db, holdId, releaseLedgerFor("decline", sessionId)),
         ]);
 
         const resolvedCount = [resultA, resultB].filter((r) => r.resolved).length;
@@ -425,13 +534,17 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
           campaignBudgetTotalMinor: 100_000,
           perDealCapMinor: 50_000,
         });
-        const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 20_000 });
-        const holdId = await reserveHold({ merchantId, offerId, amountMinor: 20_000 });
+        const { offerId, sessionId } = await insertSessionAndOffer({
+          merchantId,
+          index: 0,
+          shortfallMinor: 20_000,
+        });
+        const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: 20_000 });
 
         const db = await getTestDb();
         const [releaseResult, commitResult] = await Promise.all([
-          releaseCampaignHold(db, holdId),
-          commitCampaignHold(db, holdId),
+          releaseCampaignHold(db, holdId, releaseLedgerFor("decline", sessionId)),
+          commitCampaignHold(db, holdId, commitLedgerFor(sessionId)),
         ]);
 
         const resolvedCount = [releaseResult, commitResult].filter((r) => r.resolved).length;
@@ -459,14 +572,18 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
         campaignBudgetTotalMinor: 100_000,
         perDealCapMinor: 50_000,
       });
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 20_000 });
-      const holdId = await reserveHold({ merchantId, offerId, amountMinor: 20_000 });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: 20_000,
+      });
+      const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: 20_000 });
 
       const db = await getTestDb();
-      const commitResult = await commitCampaignHold(db, holdId);
+      const commitResult = await commitCampaignHold(db, holdId, commitLedgerFor(sessionId));
       expect(commitResult.resolved).toBe(true);
 
-      const releaseAfterCommit = await releaseCampaignHold(db, holdId);
+      const releaseAfterCommit = await releaseCampaignHold(db, holdId, releaseLedgerFor("decline", sessionId));
       expect(releaseAfterCommit.resolved).toBe(false);
 
       const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.id, holdId));
@@ -478,14 +595,18 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
         campaignBudgetTotalMinor: 100_000,
         perDealCapMinor: 50_000,
       });
-      const offerId = await insertSessionAndOffer({ merchantId, index: 0, shortfallMinor: 20_000 });
-      const holdId = await reserveHold({ merchantId, offerId, amountMinor: 20_000 });
+      const { offerId, sessionId } = await insertSessionAndOffer({
+        merchantId,
+        index: 0,
+        shortfallMinor: 20_000,
+      });
+      const holdId = await reserveHold({ merchantId, offerId, sessionId, amountMinor: 20_000 });
 
       const db = await getTestDb();
-      const releaseResult = await releaseCampaignHold(db, holdId);
+      const releaseResult = await releaseCampaignHold(db, holdId, releaseLedgerFor("decline", sessionId));
       expect(releaseResult.resolved).toBe(true);
 
-      const commitAfterRelease = await commitCampaignHold(db, holdId);
+      const commitAfterRelease = await commitCampaignHold(db, holdId, commitLedgerFor(sessionId));
       expect(commitAfterRelease.resolved).toBe(false);
 
       const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.id, holdId));
@@ -494,10 +615,15 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
     it("resolving a nonexistent hold id is a safe no-op", async () => {
       const db = await getTestDb();
-      const releaseResult = await releaseCampaignHold(db, randomUUID());
+      const dummySessionId = randomUUID();
+      const releaseResult = await releaseCampaignHold(
+        db,
+        randomUUID(),
+        releaseLedgerFor("decline", dummySessionId),
+      );
       expect(releaseResult.resolved).toBe(false);
 
-      const commitResult = await commitCampaignHold(db, randomUUID());
+      const commitResult = await commitCampaignHold(db, randomUUID(), commitLedgerFor(dummySessionId));
       expect(commitResult.resolved).toBe(false);
     });
   });
@@ -521,12 +647,17 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
       expect(outstandingBefore).toBe(0);
 
       for (let i = 0; i < ITERATIONS; i++) {
-        const offerId = await insertSessionAndOffer({ merchantId, index: i, shortfallMinor: AMOUNT_MINOR });
+        const { offerId, sessionId } = await insertSessionAndOffer({
+          merchantId,
+          index: i,
+          shortfallMinor: AMOUNT_MINOR,
+        });
         const reserveResult = await reserveCampaignBudget(db, {
           merchantId,
           offerId,
           amountMinor: AMOUNT_MINOR,
           expiresAt: new Date(Date.now() + 600_000),
+          ledger: reserveLedgerFor(sessionId),
         });
 
         // Each iteration must succeed: if abandoned holds were leaking
@@ -534,7 +665,11 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
         expect(reserveResult.reserved).toBe(true);
         if (!reserveResult.reserved) continue;
 
-        const releaseResult = await releaseCampaignHold(db, reserveResult.hold.id);
+        const releaseResult = await releaseCampaignHold(
+          db,
+          reserveResult.hold.id,
+          releaseLedgerFor("decline", sessionId),
+        );
         expect(releaseResult.resolved).toBe(true);
       }
 
@@ -546,16 +681,17 @@ describe("TICKET-108 — campaign hold lifecycle (release / commit)", () => {
 
       // And the full budget really is available again: one final reservation
       // for the entire amount succeeds.
-      const finalOfferId = await insertSessionAndOffer({
+      const finalOffer = await insertSessionAndOffer({
         merchantId,
         index: ITERATIONS,
         shortfallMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
       });
       const finalResult = await reserveCampaignBudget(db, {
         merchantId,
-        offerId: finalOfferId,
+        offerId: finalOffer.offerId,
         amountMinor: CAMPAIGN_BUDGET_TOTAL_MINOR,
         expiresAt: new Date(Date.now() + 600_000),
+        ledger: reserveLedgerFor(finalOffer.sessionId),
       });
       expect(finalResult.reserved).toBe(true);
     },
