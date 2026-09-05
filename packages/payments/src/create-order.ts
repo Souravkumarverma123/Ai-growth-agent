@@ -6,7 +6,12 @@ import {
   cancelUnattachedOrder,
   reserveLocalOrder,
 } from "./order-repository";
-import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } from "./razorpay-client";
+import {
+  createRazorpayOrder,
+  RazorpayNetworkError,
+  type RazorpayOrder,
+  type RazorpayOrderRequest,
+} from "./razorpay-client";
 
 /**
  * TICKET-301 — CONTRACTS.md §2, boundary rule B3.
@@ -29,11 +34,47 @@ import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } fr
  * `createRazorpayOrder` if that reservation actually succeeded. A concurrent
  * or retried call for an `offerId` that already has a reservation never
  * reaches Razorpay at all — it fails at the local `INSERT`, which Postgres's
- * own unique index serializes, and surfaces as a thrown `OrderAlreadyExistsError`
- * rather than a raw Postgres error or a silent second order. This is our own
- * database-enforced idempotency, never anything supplied by Razorpay — see
+ * own unique index serializes. This is our own database-enforced
+ * idempotency, never anything supplied by Razorpay — see
  * `packages/database/models/payment.ts`'s module doc ("IDEMPOTENCY IS OURS,
  * NOT THE RAIL'S") and `packages/database/repositories/orders.ts`.
+ *
+ * A stuck reservation is NOT always a genuine duplicate, and this function
+ * treats the two cases differently on purpose:
+ *   - The reservation's `railOrderId` is set: a rail order is *confirmed* to
+ *     exist for this offer (attach only ever writes it after Razorpay
+ *     returned success) — a real duplicate attempt, `OrderAlreadyExistsError`.
+ *   - The reservation exists but `railOrderId` is still null: some earlier
+ *     attempt's Razorpay POST or attach step failed, and this function has
+ *     no way to know from here whether a live Razorpay order exists for it.
+ *     Retrying blindly could create a second live order, since Razorpay's
+ *     Orders API has no idempotency key to fall back on (CONTRACTS.md §2 —
+ *     "do not reference X-Payout-Idempotency anywhere", a RazorpayX Payouts
+ *     feature, not Orders). So this is surfaced as a distinct
+ *     `OrderReservationIncompleteError` instead — needs reconciliation
+ *     against Razorpay (TICKET-304's polling reconciler), not a retry.
+ *
+ * The same two-failure-mode distinction applies to a fresh attempt's own
+ * POST + attach sequence, and it takes three shapes, not two, because
+ * `createRazorpayOrder` failing is not on its own proof that no order was
+ * created:
+ *   - `createRazorpayOrder` throws anything OTHER than a
+ *     `RazorpayNetworkError` (missing credentials, or a definitive non-2xx
+ *     response FROM Razorpay itself): no order was created, full stop — the
+ *     reservation is freed (`cancelUnattachedOrder`) and a retry is safe.
+ *   - `createRazorpayOrder` throws a `RazorpayNetworkError` (the request
+ *     itself failed at the network level — see `razorpay-client.ts`): the
+ *     outcome is genuinely unknown. The request may never have reached
+ *     Razorpay, or it may have reached them, created a real order, and only
+ *     the response was lost. Freeing the reservation here would be exactly
+ *     as unsafe as freeing it after a confirmed success, so this is treated
+ *     the same as the case below: the reservation stays, and
+ *     `OrderReservationIncompleteError` is thrown.
+ *   - The POST succeeds but `attachRailOrderId` then fails: a live Razorpay
+ *     order is now confirmed to exist — the reservation is deliberately
+ *     left in place (not freed) so nothing else can reserve this offer's
+ *     slot, and `OrderReservationIncompleteError` is thrown instead of
+ *     silently losing track of it.
  */
 export class OrderAlreadyExistsError extends Error {
   readonly offerId: string;
@@ -45,31 +86,83 @@ export class OrderAlreadyExistsError extends Error {
   }
 }
 
+/**
+ * A rail order is confirmed (or strongly suspected) to exist for this offer,
+ * but recording it locally never completed — do not retry automatically.
+ * `railOrderId` is the id to reconcile against, when known.
+ */
+export class OrderReservationIncompleteError extends Error {
+  readonly offerId: string;
+  readonly localOrderId: string;
+  readonly railOrderId: string | null;
+
+  constructor(offerId: string, localOrderId: string, railOrderId: string | null) {
+    super(
+      `createOrder: offerId "${offerId}" has an incomplete order reservation` +
+        (railOrderId ? ` (rail order "${railOrderId}" may already exist)` : "") +
+        ` — this needs reconciliation against Razorpay, not an automatic retry.`,
+    );
+    this.name = "OrderReservationIncompleteError";
+    this.offerId = offerId;
+    this.localOrderId = localOrderId;
+    this.railOrderId = railOrderId;
+  }
+}
+
 export async function createOrder(offerId: string): Promise<RazorpayOrder> {
   const offer = await getOfferById(offerId);
 
   // Reserve-before-POST: the local row must exist, uniquely, before we ever
-  // talk to Razorpay. If it doesn't (an order already exists for this
-  // offer), we stop right here — no second POST, no raw DB error escaping.
+  // talk to Razorpay.
   const reservation = await reserveLocalOrder({ offerId: offer.id });
 
   if (!reservation.reserved) {
-    throw new OrderAlreadyExistsError(offerId);
+    if (reservation.existingOrder.railOrderId) {
+      throw new OrderAlreadyExistsError(offerId);
+    }
+    throw new OrderReservationIncompleteError(
+      offerId,
+      reservation.existingOrder.id,
+      reservation.existingOrder.railOrderId,
+    );
   }
 
+  let razorpayOrder: RazorpayOrder;
   try {
-    const request = buildRazorpayOrderRequest(offer);
-    const razorpayOrder = await createRazorpayOrder(request);
-    // Record what the reservation actually produced, for human reconciliation
-    // and for TICKET-304's polling reconciler to have a rail order id to poll.
-    await attachRailOrderId(reservation.order.id, razorpayOrder);
-    return razorpayOrder;
+    razorpayOrder = await createRazorpayOrder(buildRazorpayOrderRequest(offer));
   } catch (error) {
-    // Razorpay or attach failed — free the unattached reservation so a retry
-    // can create the missing rail order instead of hitting OrderAlreadyExistsError.
+    if (error instanceof RazorpayNetworkError) {
+      // Outcome unknown — the request may have reached Razorpay and created
+      // an order, with only the response lost. Do NOT free the reservation
+      // or allow a blind retry (see module doc); this needs reconciliation,
+      // same as an attach failure below.
+      throw new OrderReservationIncompleteError(offerId, reservation.order.id, null);
+    }
+    // A definitive failure (missing credentials, or Razorpay itself
+    // rejected the request with a non-2xx response) — no order was ever
+    // created, so it's safe to free the reservation for a retry.
     await cancelUnattachedOrder(reservation.order.id).catch(() => {});
     throw error;
   }
+
+  // Record what the reservation actually produced, for human reconciliation
+  // and for TICKET-304's polling reconciler to have a rail order id to poll.
+  let attached: Awaited<ReturnType<typeof attachRailOrderId>>;
+  try {
+    attached = await attachRailOrderId(reservation.order.id, razorpayOrder);
+  } catch {
+    // Razorpay DID create an order, but recording it failed. Do NOT free the
+    // reservation — see module doc — a retry must not blindly re-POST.
+    throw new OrderReservationIncompleteError(offerId, reservation.order.id, razorpayOrder.id);
+  }
+  if (!attached || attached.railOrderId !== razorpayOrder.id) {
+    // attachRailOrder is write-once: this only happens if something else
+    // already attached a different rail order to this same reservation, an
+    // unexpected state this function has no way to resolve on its own.
+    throw new OrderReservationIncompleteError(offerId, reservation.order.id, razorpayOrder.id);
+  }
+
+  return razorpayOrder;
 }
 
 /**

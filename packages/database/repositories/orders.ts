@@ -19,8 +19,11 @@ import { ordersTable, type SelectOrder } from "../models/payment";
  * relies on Postgres to reject a second concurrent insert for the same
  * `offerId` at the database level (error code `23505`, unique_violation),
  * and translates that into a clean domain result — `{ reserved: false,
- * reason: "ORDER_ALREADY_EXISTS" }` — rather than letting a raw
- * Postgres error escape to a caller that shouldn't know what `23505` means.
+ * reason: "ORDER_ALREADY_EXISTS", existingOrder }` — rather than letting a
+ * raw Postgres error escape to a caller that shouldn't know what `23505`
+ * means. `existingOrder` lets the caller tell a genuinely complete order
+ * (`railOrderId` set) apart from a reservation stuck without one — see
+ * `createOrder`'s own handling in `packages/payments/src/create-order.ts`.
  * Two concurrent `reserveOrder` calls for the same offer therefore always
  * leave exactly one row: Postgres's own unique index serializes the two
  * inserts, and only one can ever commit.
@@ -49,7 +52,7 @@ export type ReserveOrderParams = {
 
 export type ReserveOrderResult =
   | { reserved: true; order: SelectOrder }
-  | { reserved: false; reason: "ORDER_ALREADY_EXISTS" };
+  | { reserved: false; reason: "ORDER_ALREADY_EXISTS"; existingOrder: SelectOrder };
 
 type PgLikeError = { code?: string; constraint?: string; cause?: unknown };
 
@@ -96,6 +99,29 @@ export async function reserveOrder(
   database: NodePgDatabase,
   params: ReserveOrderParams,
 ): Promise<ReserveOrderResult> {
+  return reserveOrderAttempt(database, params, /* retriesLeft */ 1);
+}
+
+/**
+ * A unique-constraint violation only proves a conflicting row existed at
+ * `INSERT` time — by the time the follow-up `SELECT` below runs, a
+ * concurrent caller's own cleanup (`deleteUnattachedOrder`, called by
+ * `createOrder` after its own Razorpay POST failed) can have already
+ * deleted it. Without `retriesLeft`, that SELECT finding nothing would
+ * force a choice between fabricating a `SelectOrder` (an unsound `!`
+ * assertion, the actual bug this guards against) or returning `undefined`
+ * despite the type saying otherwise. Since the conflict has provably
+ * cleared by the time that happens, retrying our own `INSERT` once is
+ * correct, not just convenient: it either succeeds (the offer's slot is
+ * genuinely free now) or hits a fresh conflict to report for real. Bounded
+ * to one retry — if it happens twice in a row, something is deleting rows
+ * for this offer fast enough to warrant a human looking, not another retry.
+ */
+async function reserveOrderAttempt(
+  database: NodePgDatabase,
+  params: ReserveOrderParams,
+  retriesLeft: number,
+): Promise<ReserveOrderResult> {
   const { offerId } = params;
 
   try {
@@ -119,7 +145,25 @@ export async function reserveOrder(
     return { reserved: true, order: typed! };
   } catch (error) {
     if (isUniqueViolationOn(error, ORDERS_OFFER_ID_UNIQUE_CONSTRAINT)) {
-      return { reserved: false, reason: "ORDER_ALREADY_EXISTS" };
+      // The unique constraint is on offerId, so a violation means exactly
+      // one row for this offer existed at INSERT time — fetch it so the
+      // caller can tell a genuinely complete order (railOrderId set) apart
+      // from a reservation stuck without one (see createOrder's own
+      // handling). It can be gone by now (see this function's doc comment).
+      const [existingOrder] = await database
+        .select()
+        .from(ordersTable)
+        .where(eq(ordersTable.offerId, offerId));
+      if (!existingOrder) {
+        if (retriesLeft > 0) {
+          return reserveOrderAttempt(database, params, retriesLeft - 1);
+        }
+        throw new Error(
+          `reserveOrder: unique-violation for offerId "${offerId}" but no conflicting row was ` +
+            `found even after a retry — investigate concurrent deletion of orders for this offer`,
+        );
+      }
+      return { reserved: false, reason: "ORDER_ALREADY_EXISTS", existingOrder };
     }
     // Anything else (a missing offer FK, a connection failure, ...) is a real
     // problem this module has no clean domain code for — fail closed and
