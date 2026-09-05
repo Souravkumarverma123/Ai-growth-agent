@@ -16,10 +16,18 @@ import { createRazorpayOrder, type RazorpayOrder, type RazorpayOrderRequest } fr
  * No capture or charge call exists anywhere in this package — see
  * `./razorpay-client.ts`'s module doc. `createOrder` only ever creates a
  * Razorpay order; a human buyer authorizes it from there (TICKET-303).
+ *
+ * KNOWN GAP (ISSUE-009): this function does not reserve or persist a local
+ * order before the external POST, so concurrent or retried calls for one
+ * `offerId` can create more than one Razorpay order. Offer-to-order
+ * uniqueness is out of scope for TICKET-301 (kept read-only here to avoid
+ * colliding with TICKET-111) and is the whole scope of TICKET-302 — do not
+ * fix it on this branch.
  */
 export async function createOrder(offerId: string): Promise<RazorpayOrder> {
   const offer = await getOfferById(offerId);
   const request = buildRazorpayOrderRequest(offer);
+  // ISSUE-009 / TICKET-302: no reserve-before-POST — duplicate orders possible under a race.
   return createRazorpayOrder(request);
 }
 
