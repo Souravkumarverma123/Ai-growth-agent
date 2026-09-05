@@ -69,6 +69,127 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-009 — Raw `sql`-tagged timestamp comparisons silently corrupt under the host's local time zone
+
+Status: FIXED
+Severity: HIGH
+Found in: TICKET-111
+Date: 2026-09-05
+Violates invariant: 10 (offers are single-use and expire after 10 minutes) — not by design but by exposing a latent footgun that would silently break the TTL check anywhere it's reused this way.
+
+### Problem
+
+`packages/database/repositories/offers.ts`'s `acceptOffer` needed to compare
+`offers.expires_at` (a Postgres `timestamp` — no time zone — column, frozen
+schema) against the accept attempt's `now`. The first implementation bound a
+raw JS `Date` object directly into a `drizzle-orm` `sql` template tag —
+`WHERE expires_at > ${now}` — the same style `campaign-holds.ts` uses for
+`now()`/`clock_timestamp()` SQL-side comparisons, but here the comparison
+value came from the JS side, not from Postgres itself.
+
+Every accept attempt against a genuinely unexpired, unconsumed, basket-exact
+offer failed with `OFFER_EXPIRED` — including the straightforward "accept a
+valid offer" case — when run in this sandbox, whose host process time zone
+is `Asia/Calcutta` (UTC+5:30).
+
+### Expected / Actual
+
+Expected: a freshly minted offer, accepted well within its 600s TTL,
+succeeds regardless of the host machine's configured time zone.
+Actual: it failed every time, misclassified as expired.
+
+### Root Cause
+
+Two compounding issues, both time-zone-dependent, found in this order:
+
+1. **Read side.** `NodePgDatabase#execute` (raw `sql` tag) — unlike a plain
+   `pg.Pool` query and unlike `drizzle-orm`'s own query builder — hands back
+   a `timestamp` (no zone) column as raw Postgres text with no zone marker
+   (e.g. `"2026-09-05 12:49:32.854126"`, space-separated, no `Z`/offset).
+   Passing that string straight to `new Date(...)` makes JS parse it in the
+   *host process's local* time zone rather than UTC — verified directly:
+   `new Date("2026-09-05 12:49:32.854126")` on this host comes out ~5.5
+   hours off from the intended UTC instant. `drizzle-orm`'s own column
+   mapping (`pg-core/columns/timestamp.ts`, `mapFromDriverValue`) already
+   works around exactly this by appending `+0000` before parsing — this
+   module's raw-`sql` path had no equivalent.
+2. **Write/compare side.** Even after fixing the read side, every "should
+   succeed" test still failed. The bound `${now}` parameter — a raw JS
+   `Date` object handed straight to `pg`'s default parameter serialization —
+   round-tripped incorrectly against a zone-less column: probed directly
+   against this repo's own test database, binding `new Date()` as `$1` and
+   comparing `$1::timestamp` vs. `$1::timestamptz` produced instants ~5.5
+   hours apart (this host's UTC offset) from each other and from the true
+   current instant. `drizzle-orm`'s own column mapping
+   (`mapToDriverValue`) avoids this entirely by never handing `pg` a raw
+   `Date` for this column type — it always sends `value.toISOString()`, an
+   unambiguous UTC string, instead.
+
+Both bugs are latent in *any* raw `sql`-tagged query in this codebase that
+binds a JS `Date` against, or reads back, a zone-less `timestamp` column and
+then does JS-side `Date` arithmetic on the result — they only surface on a
+host whose local time zone isn't UTC (this sandbox; plausibly some
+contributors' laptops or CI runners too), which is exactly why `pnpm test`
+could pass in one environment and fail in another with no code change.
+
+### Impact
+
+Had this shipped, `acceptOffer`'s `OFFER_EXPIRED` check would misfire
+(false positives) or, depending on the sign of the host's UTC offset,
+under-enforce the TTL (false negatives — accepting an offer that should have
+been refused) on any deployment host not configured to UTC. Caught before
+merge by this ticket's own required tests, all of which initially failed for
+this reason; never reached `dev` or any real data.
+
+### Fix
+
+Applied, contained entirely inside
+`packages/database/repositories/offers.ts`:
+
+- Every raw-SQL read of `expires_at` / `consumed_at` / `created_at` now goes
+  through a local `toDate` helper that normalizes Postgres's zone-less text
+  to ISO-8601 and appends `Z` before parsing, forcing the UTC interpretation
+  this codebase always intends (mirroring `drizzle-orm`'s own
+  `mapFromDriverValue` for the same column type).
+- Every raw-SQL write/compare of `now` uses `now.toISOString()` — never a
+  raw `Date` object — mirroring `drizzle-orm`'s own `mapToDriverValue` for
+  `timestamp` columns.
+
+This is scoped to the one new file this ticket added; no existing repository
+function was touched. Worth a follow-up: `campaign-holds.ts` and
+`audit-events.ts` don't hit this bug today only because they never do
+JS-side `Date` arithmetic on a value read back through a raw `sql` tag (their
+timestamp comparisons all happen SQL-side, via `now()`/`clock_timestamp()`,
+or the value is only ever checked for null-ness) — but the underlying
+footgun (raw `Date` bound into `sql`\`\` against a zone-less column) is
+general to this codebase, not specific to offers, and would be worth a
+shared helper or a lint rule if another ticket hits it again.
+
+### Regression Test
+
+`packages/database/tests/offer-acceptance.test.ts`'s "accepts a valid,
+unexpired, unconsumed offer" test and its `OFFER_EXPIRED` boundary tests are
+the regression coverage: they run in whatever time zone the test runner's
+host is configured to, and would have failed under the original bug in this
+sandbox specifically. (No test asserts a specific non-UTC time zone —
+CI/local hosts weren't assumed to control for this — but the fix itself no
+longer depends on the host's time zone at all, which is what actually
+closes the gap.)
+
+### Related Ticket
+
+TICKET-111 (found and fixed here)
+
+### Status History
+
+- 2026-09-05: OPEN — discovered when every `acceptOffer` test, including the
+  straightforward success case, failed with `OFFER_EXPIRED` in this sandbox.
+- 2026-09-05: FIXED — raw-SQL timestamp reads and writes in
+  `offers.ts` now force UTC explicitly, matching the discipline
+  `drizzle-orm`'s own column mapping already uses for the same column type.
+
+---
+
 ## ISSUE-008 — `paymentsBoundaries`' model-SDK rule mislabeled itself "B3", colliding with the real B3
 
 Status: FIXED

@@ -440,7 +440,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-111 — Offer TTL, single-use, and basket binding
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-110
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-110
 
 **Objective.** Three refusals that make an offer unreplayable, unreassignable, and perishable.
 
