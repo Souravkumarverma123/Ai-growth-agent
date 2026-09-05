@@ -95,7 +95,8 @@ export const auditRouter = router({
     )
     .query(async ({ input, ctx }) => {
       const events = await getAuditEventsForSession(ctx.db, input.sessionId);
-      const result = verifyChain(events as unknown as ChainEvent[]);
+      const chainEvents: ChainEvent[] = events;
+      const result = verifyChain(chainEvents);
 
       return {
         valid: result.valid,
