@@ -1,5 +1,6 @@
 import { getAuditEventsForSession } from "@repo/database/repositories/audit-events";
 import { verifyChain, type ChainEvent } from "@repo/policy";
+import type { NegotiationEvent } from "@repo/policy/contracts";
 
 import { z } from "../../schema";
 import { publicProcedure, router } from "../../trpc";
@@ -95,7 +96,18 @@ export const auditRouter = router({
     )
     .query(async ({ input, ctx }) => {
       const events = await getAuditEventsForSession(ctx.db, input.sessionId);
-      const chainEvents: ChainEvent[] = events;
+
+      // `audit_events.event_type` is a `text` column, not a pg enum (unlike
+      // `from_state`/`to_state`), so Drizzle infers it as `string`. The only
+      // writer, `appendAuditEvent`, requires a `NegotiationEvent`
+      // (packages/database/repositories/audit-events.ts), so every stored
+      // value is one — this narrows just that field instead of casting the
+      // whole row through `unknown`, which would silently hide any other
+      // mismatch between `SelectAuditEvent` and `ChainEvent`.
+      const chainEvents: ChainEvent[] = events.map((event) => ({
+        ...event,
+        eventType: event.eventType as NegotiationEvent,
+      }));
       const result = verifyChain(chainEvents);
 
       return {
