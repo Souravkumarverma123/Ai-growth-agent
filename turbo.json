@@ -5,9 +5,7 @@
     "SKIP_ENV_VALIDATION"
   ],
   "globalPassThroughEnv": [
-    "DATABASE_URL",
-    "RAZORPAY_KEY_ID",
-    "RAZORPAY_KEY_SECRET"
+    "DATABASE_URL"
   ],
   "tasks": {
     "build": {
