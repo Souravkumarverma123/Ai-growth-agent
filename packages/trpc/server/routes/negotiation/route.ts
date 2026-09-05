@@ -37,6 +37,7 @@ import { appendAuditEvent, type AppendAuditEventParams } from "@repo/database/re
 import { acceptOffer as acceptOfferRepo } from "@repo/database/repositories/offers";
 import {
   getNegotiationSession,
+  getNegotiationSessionForUpdate,
   updateNegotiationSession,
 } from "@repo/database/repositories/negotiation-sessions";
 import { releaseCampaignHold, reserveCampaignBudget } from "@repo/database/repositories/campaign-holds";
@@ -321,233 +322,254 @@ export const negotiationRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      const session = await getNegotiationSession(ctx.db, input.negotiationId);
-      if (!session) notFound("negotiation", input.negotiationId);
-      if (session.state !== "OPEN") {
-        badRequest(`negotiation "${session.id}" is not open for a proposal (state ${session.state})`);
-      }
+      return ctx.db.transaction(async (tx) => {
+        // FOR UPDATE: serializes concurrent propose calls on this session — a
+        // second call blocks here until the first's transaction commits, then
+        // sees the real post-write state instead of a stale "still OPEN"
+        // snapshot (see this function's own doc in negotiation-sessions.ts).
+        const session = await getNegotiationSessionForUpdate(tx, input.negotiationId);
+        if (!session) notFound("negotiation", input.negotiationId);
+        if (session.state !== "OPEN") {
+          badRequest(`negotiation "${session.id}" is not open for a proposal (state ${session.state})`);
+        }
 
-      const { policy, skuCatalogue } = await loadMerchantNegotiationContext(ctx.db, session.merchantId);
-      const agentRoundIndex = session.roundIndex + 1;
-      const now = new Date();
+        const { policy, skuCatalogue } = await loadMerchantNegotiationContext(tx, session.merchantId);
+        const agentRoundIndex = session.roundIndex + 1;
+        const now = new Date();
 
-      // Round cap (PRD §14/§15's ROUND_INCREMENTED guard) — checked BEFORE
-      // generating a fresh candidate set at all.
-      const roundCap = evaluateRoundCap(agentRoundIndex, policy.maxRounds);
-      if (!roundCap.allowed) {
-        const transition = resolveRoundIncrementedTransition(agentRoundIndex, policy.maxRounds);
-        await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(transition, {
-            sessionId: session.id,
-            payload: { roundIndex: agentRoundIndex, maxRounds: policy.maxRounds },
-            policyVersion: session.policyVersion,
-          }),
-        );
-        await updateNegotiationSession(ctx.db, session.id, { state: transition.to });
-        return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: roundCap.reasonCode };
-      }
+        // Round cap (PRD §14/§15's ROUND_INCREMENTED guard) — checked BEFORE
+        // generating a fresh candidate set at all.
+        const roundCap = evaluateRoundCap(agentRoundIndex, policy.maxRounds);
+        if (!roundCap.allowed) {
+          const transition = resolveRoundIncrementedTransition(agentRoundIndex, policy.maxRounds);
+          await appendAuditEvent(
+            tx,
+            auditParamsFromTransition(transition, {
+              sessionId: session.id,
+              payload: { roundIndex: agentRoundIndex, maxRounds: policy.maxRounds },
+              policyVersion: session.policyVersion,
+            }),
+          );
+          await updateNegotiationSession(tx, session.id, { state: transition.to });
+          return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: roundCap.reasonCode };
+        }
 
-      const generation = generateCandidates({
-        session: {
-          originalBasket: session.originalBasket,
-          counterfactualContributionMinor: session.counterfactualContributionMinor,
-          roundIndex: agentRoundIndex,
-        },
-        policy,
-        skuCatalogue,
-      });
-
-      const availableCampaignBudgetMinor = await getAvailableCampaignBudgetMinor(ctx.db, session.merchantId);
-
-      const tierResult = assignTiersAndFeasibility({
-        candidates: generation.candidates,
-        tier1Refused: session.tier1Refused,
-        perDealCapMinor: policy.perDealCapMinor,
-        availableCampaignBudgetMinor,
-      });
-
-      const generatedTransition = resolveCandidatesGeneratedTransition(tierResult);
-      await appendAuditEvent(
-        ctx.db,
-        auditParamsFromTransition(generatedTransition, {
-          sessionId: session.id,
-          payload: { ...generation.counts },
-          policyVersion: session.policyVersion,
-        }),
-      );
-
-      if (!tierResult.feasible) {
-        await updateNegotiationSession(ctx.db, session.id, { state: generatedTransition.to });
-        return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: tierResult.reasonCode };
-      }
-
-      const candidatesInRound = assignCandidateIdentity(tierResult.candidates, session.id, agentRoundIndex);
-      await persistCandidatesForRound(ctx.db, candidatesInRound);
-
-      // Which candidate the merchant model will choose, decided up front so
-      // Tier 2 campaign budget can be reserved BEFORE `mintOffer` — `mintOffer`
-      // requires the reservation's outcome (and, for Tier 2, its `offerId`) as
-      // a plain input (see `packages/policy/minting/mint.ts`'s own module
-      // doc); `DeterministicMerchantModel.nextIntent` (below, via
-      // `runNegotiationRound`) independently re-derives the identical choice
-      // from the identical exposed set, so the two never disagree.
-      const model = new DeterministicMerchantModel();
-      const exposedCandidates = selectExposedCandidates(candidatesInRound, session.tier1Refused);
-      const previewIntent = model.nextIntent({
-        sessionId: session.id,
-        roundIndex: agentRoundIndex,
-        candidates: exposedCandidates,
-        conversation: [],
-      });
-      const chosen = candidatesInRound.find((c) => c.candidateId === previewIntent.candidateId)!;
-
-      let campaignBudgetReservation: CampaignBudgetReservationOutcome | undefined;
-
-      if (chosen.tier === 2) {
-        // RA-3: eligibility is re-checked once, here, before a Tier 2 mint —
-        // never per round, and never before Tier 1. Catches, in particular,
-        // the kill switch being flipped mid-negotiation (RA-1).
-        const reCheck = checkEligibility({
-          session: { originalBasket: session.originalBasket, isFlaggedAtRisk: isFlaggedAtRisk(session.state) },
+        const generation = generateCandidates({
+          session: {
+            originalBasket: session.originalBasket,
+            counterfactualContributionMinor: session.counterfactualContributionMinor,
+            roundIndex: agentRoundIndex,
+          },
           policy,
           skuCatalogue,
         });
-        if (!reCheck.eligible) {
-          // No row in the frozen state machine models "RA-3 re-check failed
-          // mid-negotiation" specifically (every NEGOTIATION_REQUESTED row is
-          // keyed from IDLE/AT_RISK, not OPEN) — recorded as ISSUE-012
-          // (issue-tracker.md) rather than fabricating a transition row.
-          // Fails closed regardless: halts rather than mints.
-          await appendAuditEvent(ctx.db, {
-            sessionId: session.id,
-            eventType: "NEGOTIATION_REQUESTED",
-            fromState: "OPEN",
-            toState: "HALTED",
-            reasonCode: reCheck.reasonCode,
-            payload: { note: "RA-3 re-check before Tier 2 mint failed" },
-            policyVersion: session.policyVersion,
-          });
-          await updateNegotiationSession(ctx.db, session.id, { state: "HALTED" });
-          return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: reCheck.reasonCode };
-        }
 
-        const reservationOfferId = randomUUID();
-        const reserveResult = await reserveCampaignBudget(ctx.db, {
-          merchantId: session.merchantId,
-          offerId: reservationOfferId,
-          amountMinor: chosen.requiredCampaignSpendMinor,
-          expiresAt: new Date(now.getTime() + policy.offerTtlSeconds * 1000),
-          ledger: ledgerContextFromTransition(resolveBudgetReservedTransition(2), {
-            sessionId: session.id,
-            policyVersion: session.policyVersion,
-          }),
+        const availableCampaignBudgetMinor = await getAvailableCampaignBudgetMinor(tx, session.merchantId);
+
+        const tierResult = assignTiersAndFeasibility({
+          candidates: generation.candidates,
+          tier1Refused: session.tier1Refused,
+          perDealCapMinor: policy.perDealCapMinor,
+          availableCampaignBudgetMinor,
         });
 
-        campaignBudgetReservation = reserveResult.reserved
-          ? { reserved: true, offerId: reservationOfferId, amountMinor: chosen.requiredCampaignSpendMinor }
-          : { reserved: false, reasonCode: reserveResult.reasonCode };
-      }
-
-      const roundResult = await runNegotiationRound({
-        sessionId: session.id,
-        state: { roundIndex: agentRoundIndex, tier1Refused: session.tier1Refused } satisfies RoundState,
-        policyVersion: session.policyVersion,
-        candidatesInRound,
-        conversation: [{ role: "buyer", content: input.message }],
-        model,
-        now,
-        offerTtlSeconds: policy.offerTtlSeconds,
-        campaignBudgetReservation,
-      });
-
-      if (roundResult.status === "WALKED_AWAY") {
-        // Unreachable through `DeterministicMerchantModel` (see its own
-        // module doc — it never emits WALK_AWAY), handled anyway for
-        // exhaustiveness and in case a future model implementation does.
-        await appendAuditEvent(ctx.db, {
-          sessionId: session.id,
-          eventType: "AGENT_TERMINAL_INTENT",
-          fromState: "OPEN",
-          toState: "WALKED_AWAY",
-          reasonCode: roundResult.reasonCode,
-          payload: {},
-          policyVersion: session.policyVersion,
-        });
-        await updateNegotiationSession(ctx.db, session.id, { state: "WALKED_AWAY", roundIndex: agentRoundIndex });
-        return { roundIndex: agentRoundIndex, offer: null, terminal: true, reasonCode: roundResult.reasonCode };
-      }
-
-      if (roundResult.status === "MINT_REJECTED") {
-        // Only reachable via the Tier 2 reservation race documented on
-        // `CampaignBudgetReservationOutcome` (the tiering-time snapshot said
-        // feasible; the atomic reservation just above said otherwise) —
-        // `chosen` was already proven feasible at tiering time, so
-        // `resolveMintAttemptedTransition` (which requires `feasible: false`
-        // on its input) does not apply here; this is the exact edge case
-        // `lookupTransition` is exported for.
-        const transition = lookupTransition("OPEN", "MINT_ATTEMPTED", roundResult.reasonCode);
+        const generatedTransition = resolveCandidatesGeneratedTransition(tierResult);
         await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(transition, {
+          tx,
+          auditParamsFromTransition(generatedTransition, {
             sessionId: session.id,
-            payload: { candidateId: chosen.candidateId },
+            payload: { ...generation.counts },
             policyVersion: session.policyVersion,
           }),
         );
-        await updateNegotiationSession(ctx.db, session.id, { state: transition.to, roundIndex: agentRoundIndex });
-        return { roundIndex: agentRoundIndex, offer: null, terminal: true, reasonCode: roundResult.reasonCode };
-      }
 
-      // OFFER_MINTED
-      const { offer, intent } = roundResult;
+        if (!tierResult.feasible) {
+          await updateNegotiationSession(tx, session.id, { state: generatedTransition.to });
+          return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: tierResult.reasonCode };
+        }
 
-      // Persists the engine-signed `Offer` `mintOffer` returned — this is the
-      // only place a row is ever written to `offers` for a fresh mint (the
-      // frozen schema's own doc: "the payment path reads it from here, never
-      // from a caller"). `acceptOffer`/`respondToOffer` and TICKET-111's own
-      // `acceptOfferRepo` all read this table, so a mint that never reaches
-      // it would be invisible to every later step in the protocol.
-      await ctx.db.insert(offersTable).values({
-        id: offer.offerId,
-        sessionId: offer.sessionId,
-        candidateRef: offer.candidateId,
-        roundIndex: offer.roundIndex,
-        basket: offer.basket,
-        totalMinor: offer.totalMinor,
-        currency: offer.currency,
-        tier: offer.tier,
-        campaignSpendMinor: offer.campaignSpendMinor,
-        policyVersion: offer.policyVersion,
-        status: offer.status,
-        reasonCode: offer.reasonCode,
-        expiresAt: offer.expiresAt,
-        engineSignature: offer.engineSignature,
-      });
+        const candidatesInRound = assignCandidateIdentity(tierResult.candidates, session.id, agentRoundIndex);
+        await persistCandidatesForRound(tx, candidatesInRound);
 
-      const mintedTransition = resolveOfferMintedTransition(chosen, session.tier1Refused, true);
-      await appendAuditEvent(
-        ctx.db,
-        auditParamsFromTransition(mintedTransition, {
+        // Which candidate the merchant model will choose, decided up front so
+        // Tier 2 campaign budget can be reserved BEFORE `mintOffer` — `mintOffer`
+        // requires the reservation's outcome (and, for Tier 2, its `offerId`) as
+        // a plain input (see `packages/policy/minting/mint.ts`'s own module
+        // doc); `DeterministicMerchantModel.nextIntent` (below, via
+        // `runNegotiationRound`) independently re-derives the identical choice
+        // from the identical exposed set, so the two never disagree.
+        const model = new DeterministicMerchantModel();
+        const exposedCandidates = selectExposedCandidates(candidatesInRound, session.tier1Refused);
+        const previewIntent = model.nextIntent({
           sessionId: session.id,
-          payload: { candidateId: chosen.candidateId, moveType: chosen.moveType },
+          roundIndex: agentRoundIndex,
+          candidates: exposedCandidates,
+          conversation: [],
+        });
+        const chosen = candidatesInRound.find((c) => c.candidateId === previewIntent.candidateId)!;
+
+        let campaignBudgetReservation: CampaignBudgetReservationOutcome | undefined;
+
+        if (chosen.tier === 2) {
+          // RA-3: eligibility is re-checked once, here, before a Tier 2 mint —
+          // never per round, and never before Tier 1. Catches, in particular,
+          // the kill switch being flipped mid-negotiation (RA-1).
+          //
+          // isFlaggedAtRisk is hardcoded true, NOT re-derived from
+          // session.state: this line only runs once the earlier `session.state
+          // !== "OPEN"` guard has passed, and `openNegotiation` (this file)
+          // only ever transitions a session to OPEN after `checkEligibility`
+          // already required `isFlaggedAtRisk(session.state) === true` (i.e.
+          // state was AT_RISK) at that time. A session that is currently OPEN
+          // was therefore, necessarily, flagged at risk when it opened — the
+          // frozen schema just has no separate column still recording that
+          // once state has moved on. Re-deriving it from the CURRENT state
+          // via `isFlaggedAtRisk(session.state)` evaluates false for every
+          // OPEN session unconditionally, which made every Tier 2 proposal
+          // fail this re-check with NOT_AT_RISK regardless of any real kill
+          // switch or SKU-negotiability change — the actual things RA-3
+          // exists to catch.
+          const reCheck = checkEligibility({
+            session: { originalBasket: session.originalBasket, isFlaggedAtRisk: true },
+            policy,
+            skuCatalogue,
+          });
+          if (!reCheck.eligible) {
+            // No row in the frozen state machine models "RA-3 re-check failed
+            // mid-negotiation" specifically (every NEGOTIATION_REQUESTED row is
+            // keyed from IDLE/AT_RISK, not OPEN) — recorded as ISSUE-012
+            // (issue-tracker.md) rather than fabricating a transition row.
+            // Fails closed regardless: halts rather than mints.
+            await appendAuditEvent(tx, {
+              sessionId: session.id,
+              eventType: "NEGOTIATION_REQUESTED",
+              fromState: "OPEN",
+              toState: "HALTED",
+              reasonCode: reCheck.reasonCode,
+              payload: { note: "RA-3 re-check before Tier 2 mint failed" },
+              policyVersion: session.policyVersion,
+            });
+            await updateNegotiationSession(tx, session.id, { state: "HALTED" });
+            return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: reCheck.reasonCode };
+          }
+
+          const reservationOfferId = randomUUID();
+          const reserveResult = await reserveCampaignBudget(tx, {
+            merchantId: session.merchantId,
+            offerId: reservationOfferId,
+            amountMinor: chosen.requiredCampaignSpendMinor,
+            expiresAt: new Date(now.getTime() + policy.offerTtlSeconds * 1000),
+            ledger: ledgerContextFromTransition(resolveBudgetReservedTransition(2), {
+              sessionId: session.id,
+              policyVersion: session.policyVersion,
+            }),
+          });
+
+          campaignBudgetReservation = reserveResult.reserved
+            ? { reserved: true, offerId: reservationOfferId, amountMinor: chosen.requiredCampaignSpendMinor }
+            : { reserved: false, reasonCode: reserveResult.reasonCode };
+        }
+
+        const roundResult = await runNegotiationRound({
+          sessionId: session.id,
+          state: { roundIndex: agentRoundIndex, tier1Refused: session.tier1Refused } satisfies RoundState,
           policyVersion: session.policyVersion,
-          offerId: offer.offerId,
+          candidatesInRound,
+          conversation: [{ role: "buyer", content: input.message }],
+          model,
+          now,
+          offerTtlSeconds: policy.offerTtlSeconds,
+          campaignBudgetReservation,
+        });
+
+        if (roundResult.status === "WALKED_AWAY") {
+          // Unreachable through `DeterministicMerchantModel` (see its own
+          // module doc — it never emits WALK_AWAY), handled anyway for
+          // exhaustiveness and in case a future model implementation does.
+          await appendAuditEvent(tx, {
+            sessionId: session.id,
+            eventType: "AGENT_TERMINAL_INTENT",
+            fromState: "OPEN",
+            toState: "WALKED_AWAY",
+            reasonCode: roundResult.reasonCode,
+            payload: {},
+            policyVersion: session.policyVersion,
+          });
+          await updateNegotiationSession(tx, session.id, { state: "WALKED_AWAY", roundIndex: agentRoundIndex });
+          return { roundIndex: agentRoundIndex, offer: null, terminal: true, reasonCode: roundResult.reasonCode };
+        }
+
+        if (roundResult.status === "MINT_REJECTED") {
+          // Only reachable via the Tier 2 reservation race documented on
+          // `CampaignBudgetReservationOutcome` (the tiering-time snapshot said
+          // feasible; the atomic reservation just above said otherwise) —
+          // `chosen` was already proven feasible at tiering time, so
+          // `resolveMintAttemptedTransition` (which requires `feasible: false`
+          // on its input) does not apply here; this is the exact edge case
+          // `lookupTransition` is exported for.
+          const transition = lookupTransition("OPEN", "MINT_ATTEMPTED", roundResult.reasonCode);
+          await appendAuditEvent(
+            tx,
+            auditParamsFromTransition(transition, {
+              sessionId: session.id,
+              payload: { candidateId: chosen.candidateId },
+              policyVersion: session.policyVersion,
+            }),
+          );
+          await updateNegotiationSession(tx, session.id, { state: transition.to, roundIndex: agentRoundIndex });
+          return { roundIndex: agentRoundIndex, offer: null, terminal: true, reasonCode: roundResult.reasonCode };
+        }
+
+        // OFFER_MINTED
+        const { offer, intent } = roundResult;
+
+        // Persists the engine-signed `Offer` `mintOffer` returned — this is the
+        // only place a row is ever written to `offers` for a fresh mint (the
+        // frozen schema's own doc: "the payment path reads it from here, never
+        // from a caller"). `acceptOffer`/`respondToOffer` and TICKET-111's own
+        // `acceptOfferRepo` all read this table, so a mint that never reaches
+        // it would be invisible to every later step in the protocol.
+        await tx.insert(offersTable).values({
+          id: offer.offerId,
+          sessionId: offer.sessionId,
+          candidateRef: offer.candidateId,
+          roundIndex: offer.roundIndex,
+          basket: offer.basket,
+          totalMinor: offer.totalMinor,
+          currency: offer.currency,
+          tier: offer.tier,
           campaignSpendMinor: offer.campaignSpendMinor,
-        }),
-      );
+          policyVersion: offer.policyVersion,
+          status: offer.status,
+          reasonCode: offer.reasonCode,
+          expiresAt: offer.expiresAt,
+          engineSignature: offer.engineSignature,
+        });
 
-      await updateNegotiationSession(ctx.db, session.id, {
-        state: mintedTransition.to,
-        roundIndex: agentRoundIndex,
+        const mintedTransition = resolveOfferMintedTransition(chosen, session.tier1Refused, true);
+        await appendAuditEvent(
+          tx,
+          auditParamsFromTransition(mintedTransition, {
+            sessionId: session.id,
+            payload: { candidateId: chosen.candidateId, moveType: chosen.moveType },
+            policyVersion: session.policyVersion,
+            offerId: offer.offerId,
+            campaignSpendMinor: offer.campaignSpendMinor,
+          }),
+        );
+
+        await updateNegotiationSession(tx, session.id, {
+          state: mintedTransition.to,
+          roundIndex: agentRoundIndex,
+        });
+
+        return {
+          roundIndex: agentRoundIndex,
+          offer: toPublicOffer(offer, skuCatalogue, intent.messageFrame),
+          terminal: false,
+          reasonCode: mintedTransition.reasonCode,
+        };
       });
-
-      return {
-        roundIndex: agentRoundIndex,
-        offer: toPublicOffer(offer, skuCatalogue, intent.messageFrame),
-        terminal: false,
-        reasonCode: mintedTransition.reasonCode,
-      };
     }),
 
   respondToOffer: publicProcedure
@@ -568,75 +590,82 @@ export const negotiationRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      const session = await getNegotiationSession(ctx.db, input.negotiationId);
-      if (!session) notFound("negotiation", input.negotiationId);
-      if (session.state !== "OFFER_PENDING") {
-        badRequest(`negotiation "${session.id}" has no pending offer to respond to (state ${session.state})`);
-      }
+      return ctx.db.transaction(async (tx) => {
+        // FOR UPDATE: serializes against a concurrent acceptOffer/respondToOffer
+        // on the same session — otherwise both can read OFFER_PENDING before
+        // either writes, and a decline's unconditional setOfferStatus can
+        // overwrite an already-accepted offer's status (see this function's
+        // own doc in negotiation-sessions.ts).
+        const session = await getNegotiationSessionForUpdate(tx, input.negotiationId);
+        if (!session) notFound("negotiation", input.negotiationId);
+        if (session.state !== "OFFER_PENDING") {
+          badRequest(`negotiation "${session.id}" has no pending offer to respond to (state ${session.state})`);
+        }
 
-      const offer = await getOfferOrThrow(ctx.db, input.offerId);
-      if (offer.sessionId !== session.id) {
-        badRequest(`offer "${offer.id}" does not belong to negotiation "${session.id}"`);
-      }
+        const offer = await getOfferOrThrow(tx, input.offerId);
+        if (offer.sessionId !== session.id) {
+          badRequest(`offer "${offer.id}" does not belong to negotiation "${session.id}"`);
+        }
 
-      if (input.response === "WALK_AWAY") {
-        const transition = resolveBuyerEndsSessionTransition();
-        await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(transition, {
-            sessionId: session.id,
-            payload: { offerId: offer.id },
-            policyVersion: session.policyVersion,
-            offerId: offer.id,
-          }),
-        );
-        await setOfferStatus(ctx.db, offer.id, "DECLINED");
-        await updateNegotiationSession(ctx.db, session.id, { state: transition.to });
-        return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: transition.reasonCode };
-      }
-
-      // DECLINE_AND_CONTINUE
-      const transition = resolveBuyerDeclinesTransition(offer.tier as 1 | 2);
-
-      if (offer.tier === 2) {
-        const hold = await getCampaignHoldByOfferId(ctx.db, offer.id);
-        if (hold) {
-          // Appends its own HOLD_RELEASED ledger entry, atomically with the
-          // hold write (`campaign-holds.ts`'s own TICKET-403 discipline) — no
-          // separate `appendAuditEvent` call needed for this transition.
-          await releaseCampaignHold(
-            ctx.db,
-            hold.id,
-            ledgerContextFromTransition(transition, {
+        if (input.response === "WALK_AWAY") {
+          const transition = resolveBuyerEndsSessionTransition();
+          await appendAuditEvent(
+            tx,
+            auditParamsFromTransition(transition, {
               sessionId: session.id,
+              payload: { offerId: offer.id },
               policyVersion: session.policyVersion,
+              offerId: offer.id,
+            }),
+          );
+          await setOfferStatus(tx, offer.id, "DECLINED");
+          await updateNegotiationSession(tx, session.id, { state: transition.to });
+          return { roundIndex: session.roundIndex, offer: null, terminal: true, reasonCode: transition.reasonCode };
+        }
+
+        // DECLINE_AND_CONTINUE
+        const transition = resolveBuyerDeclinesTransition(offer.tier as 1 | 2);
+
+        if (offer.tier === 2) {
+          const hold = await getCampaignHoldByOfferId(tx, offer.id);
+          if (hold) {
+            // Appends its own HOLD_RELEASED ledger entry, atomically with the
+            // hold write (`campaign-holds.ts`'s own TICKET-403 discipline) — no
+            // separate `appendAuditEvent` call needed for this transition.
+            await releaseCampaignHold(
+              tx,
+              hold.id,
+              ledgerContextFromTransition(transition, {
+                sessionId: session.id,
+                policyVersion: session.policyVersion,
+              }),
+            );
+          }
+        } else {
+          await appendAuditEvent(
+            tx,
+            auditParamsFromTransition(transition, {
+              sessionId: session.id,
+              payload: { offerId: offer.id },
+              policyVersion: session.policyVersion,
+              offerId: offer.id,
             }),
           );
         }
-      } else {
-        await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(transition, {
-            sessionId: session.id,
-            payload: { offerId: offer.id },
-            policyVersion: session.policyVersion,
-            offerId: offer.id,
-          }),
+
+        const nextRoundState = applyOfferDeclined(
+          { roundIndex: session.roundIndex, tier1Refused: session.tier1Refused },
+          { tier: offer.tier as 1 | 2 },
         );
-      }
 
-      const nextRoundState = applyOfferDeclined(
-        { roundIndex: session.roundIndex, tier1Refused: session.tier1Refused },
-        { tier: offer.tier as 1 | 2 },
-      );
+        await setOfferStatus(tx, offer.id, "DECLINED");
+        await updateNegotiationSession(tx, session.id, {
+          state: transition.to,
+          tier1Refused: nextRoundState.tier1Refused,
+        });
 
-      await setOfferStatus(ctx.db, offer.id, "DECLINED");
-      await updateNegotiationSession(ctx.db, session.id, {
-        state: transition.to,
-        tier1Refused: nextRoundState.tier1Refused,
+        return { roundIndex: session.roundIndex, offer: null, terminal: false, reasonCode: transition.reasonCode };
       });
-
-      return { roundIndex: session.roundIndex, offer: null, terminal: false, reasonCode: transition.reasonCode };
     }),
 
   /**
@@ -667,120 +696,157 @@ export const negotiationRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      const session = await getNegotiationSession(ctx.db, input.negotiationId);
-      if (!session) notFound("negotiation", input.negotiationId);
-      if (session.state !== "OFFER_PENDING") {
-        badRequest(`negotiation "${session.id}" has no pending offer to accept (state ${session.state})`);
-      }
-
-      const offerBeforeAccept = await getOfferOrThrow(ctx.db, input.offerId);
-      if (offerBeforeAccept.sessionId !== session.id) {
-        badRequest(`offer "${offerBeforeAccept.id}" does not belong to negotiation "${session.id}"`);
-      }
-
-      const now = new Date();
-      // The frozen input schema above carries no separate "basket the buyer
-      // is trying to accept" field (see this ticket's issue-tracker entry) —
-      // the only basket this endpoint can compare against is the offer's own,
-      // so BASKET_MISMATCH is structurally unreachable through this specific
-      // transport today. Still routed through the real repository function
-      // (not skipped) so TTL and single-use are enforced exactly as TICKET-111
-      // built them.
-      const result = await acceptOfferRepo(ctx.db, {
-        offerId: offerBeforeAccept.id,
-        acceptedBasket: offerBeforeAccept.basket,
-        now,
-      });
-
-      if (!result.accepted) {
-        const transition =
-          result.reasonCode === "OFFER_EXPIRED"
-            ? resolveTtlElapsedTransition(now, offerBeforeAccept.expiresAt)
-            : resolveOfferAcceptTransition({
-                alreadyConsumed: result.reasonCode === "OFFER_ALREADY_CONSUMED",
-                basketMatches: result.reasonCode !== "BASKET_MISMATCH",
-              });
-
-        await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(transition, {
-            sessionId: session.id,
-            payload: { offerId: offerBeforeAccept.id },
-            policyVersion: session.policyVersion,
-            offerId: offerBeforeAccept.id,
-          }),
-        );
-
-        if (result.reasonCode === "OFFER_EXPIRED") {
-          await updateNegotiationSession(ctx.db, session.id, { state: transition.to });
+      return ctx.db.transaction(async (tx) => {
+        // FOR UPDATE: serializes against a concurrent respondToOffer/acceptOffer
+        // on the same session — see negotiation-sessions.ts's own doc. Without
+        // this, an accept and a decline could both read OFFER_PENDING and race
+        // (respondToOffer's setOfferStatus has no CAS guard of its own).
+        const session = await getNegotiationSessionForUpdate(tx, input.negotiationId);
+        if (!session) notFound("negotiation", input.negotiationId);
+        if (session.state !== "OFFER_PENDING") {
+          badRequest(`negotiation "${session.id}" has no pending offer to accept (state ${session.state})`);
         }
 
-        return { accepted: false, reasonCode: result.reasonCode, paymentHandle: null };
-      }
+        const offerBeforeAccept = await getOfferOrThrow(tx, input.offerId);
+        if (offerBeforeAccept.sessionId !== session.id) {
+          badRequest(`offer "${offerBeforeAccept.id}" does not belong to negotiation "${session.id}"`);
+        }
 
-      const offer = result.offer;
-      const acceptTransition = resolveOfferAcceptTransition({ alreadyConsumed: false, basketMatches: true });
-      await appendAuditEvent(
-        ctx.db,
-        auditParamsFromTransition(acceptTransition, {
-          sessionId: session.id,
-          payload: { offerId: offer.id },
-          policyVersion: session.policyVersion,
-          offerId: offer.id,
-        }),
-      );
-      await setOfferStatus(ctx.db, offer.id, "ACCEPTED");
-      await updateNegotiationSession(ctx.db, session.id, { state: acceptTransition.to });
+        // Checked BEFORE ever consuming the offer below: offers are single-use
+        // (TICKET-111), so consuming one and only then discovering autonomous
+        // payment is enabled would strand the buyer with a permanently-consumed
+        // offer and no path forward — a later retry would just report
+        // OFFER_ALREADY_CONSUMED, even though nothing about the negotiation
+        // itself failed. TICKET-306 owns the real enforced boundary; this
+        // fails closed here, before any write, rather than after.
+        const { policy } = await loadMerchantNegotiationContext(tx, session.merchantId);
+        if (policy.autonomousPaymentExecution) {
+          const paymentTransition = resolvePaymentInitiationTransition(true);
+          await appendAuditEvent(
+            tx,
+            auditParamsFromTransition(paymentTransition, {
+              sessionId: session.id,
+              payload: { offerId: offerBeforeAccept.id },
+              policyVersion: session.policyVersion,
+              offerId: offerBeforeAccept.id,
+            }),
+          );
+          throw new TRPCError({
+            code: "NOT_IMPLEMENTED",
+            message: `Autonomous payment execution is not implemented (TICKET-306). Reason: ${paymentTransition.reasonCode}.`,
+          });
+        }
 
-      const { policy } = await loadMerchantNegotiationContext(ctx.db, session.merchantId);
-      const paymentTransition = resolvePaymentInitiationTransition(policy.autonomousPaymentExecution);
+        const now = new Date();
+        // The frozen input schema above carries no separate "basket the buyer
+        // is trying to accept" field (see this ticket's issue-tracker entry) —
+        // the only basket this endpoint can compare against is the offer's own,
+        // so BASKET_MISMATCH is structurally unreachable through this specific
+        // transport today. Still routed through the real repository function
+        // (not skipped) so TTL and single-use are enforced exactly as TICKET-111
+        // built them.
+        const result = await acceptOfferRepo(tx, {
+          offerId: offerBeforeAccept.id,
+          acceptedBasket: offerBeforeAccept.basket,
+          now,
+        });
 
-      if (policy.autonomousPaymentExecution) {
-        // TICKET-306 owns the real enforced boundary; this fails closed here
-        // rather than silently proceeding, so acceptOffer never has a code
-        // path that reaches money movement under this flag.
+        if (!result.accepted) {
+          const transition =
+            result.reasonCode === "OFFER_EXPIRED"
+              ? resolveTtlElapsedTransition(now, offerBeforeAccept.expiresAt)
+              : resolveOfferAcceptTransition({
+                  alreadyConsumed: result.reasonCode === "OFFER_ALREADY_CONSUMED",
+                  basketMatches: result.reasonCode !== "BASKET_MISMATCH",
+                });
+
+          // An expired Tier 2 offer's campaign hold must be released here too
+          // — otherwise its RESERVED row and ledger never reflect that this
+          // offer is now dead, the same gap TICKET-403's release discipline
+          // already closes for an explicit buyer decline (respondToOffer,
+          // above). releaseCampaignHold appends its own ledger entry for this
+          // exact transition, so it replaces (not adds to) the generic write.
+          let holdReleased = false;
+          if (result.reasonCode === "OFFER_EXPIRED" && offerBeforeAccept.tier === 2) {
+            const hold = await getCampaignHoldByOfferId(tx, offerBeforeAccept.id);
+            if (hold) {
+              await releaseCampaignHold(
+                tx,
+                hold.id,
+                ledgerContextFromTransition(transition, {
+                  sessionId: session.id,
+                  policyVersion: session.policyVersion,
+                }),
+              );
+              holdReleased = true;
+            }
+          }
+
+          if (!holdReleased) {
+            await appendAuditEvent(
+              tx,
+              auditParamsFromTransition(transition, {
+                sessionId: session.id,
+                payload: { offerId: offerBeforeAccept.id },
+                policyVersion: session.policyVersion,
+                offerId: offerBeforeAccept.id,
+              }),
+            );
+          }
+
+          if (result.reasonCode === "OFFER_EXPIRED") {
+            await updateNegotiationSession(tx, session.id, { state: transition.to });
+          }
+
+          return { accepted: false, reasonCode: result.reasonCode, paymentHandle: null };
+        }
+
+        const offer = result.offer;
+        const acceptTransition = resolveOfferAcceptTransition({ alreadyConsumed: false, basketMatches: true });
         await appendAuditEvent(
-          ctx.db,
-          auditParamsFromTransition(paymentTransition, {
+          tx,
+          auditParamsFromTransition(acceptTransition, {
             sessionId: session.id,
             payload: { offerId: offer.id },
             policyVersion: session.policyVersion,
             offerId: offer.id,
           }),
         );
-        throw new TRPCError({
-          code: "NOT_IMPLEMENTED",
-          message: `Autonomous payment execution is not implemented (TICKET-306). Reason: ${paymentTransition.reasonCode}.`,
-        });
-      }
+        await setOfferStatus(tx, offer.id, "ACCEPTED");
+        await updateNegotiationSession(tx, session.id, { state: acceptTransition.to });
 
-      const railOrder = await createOrder(offer.id);
+        // policy.autonomousPaymentExecution is guaranteed false here (the
+        // early check above already returned/threw otherwise).
+        const paymentTransition = resolvePaymentInitiationTransition(policy.autonomousPaymentExecution);
 
-      await appendAuditEvent(
-        ctx.db,
-        auditParamsFromTransition(paymentTransition, {
-          sessionId: session.id,
-          payload: { offerId: offer.id, railOrderId: railOrder.id },
-          policyVersion: session.policyVersion,
-          offerId: offer.id,
-        }),
-      );
-      await updateNegotiationSession(ctx.db, session.id, { state: paymentTransition.to });
+        const railOrder = await createOrder(offer.id);
 
-      const localOrder = await getOrderByOfferId(ctx.db, offer.id);
-      if (!localOrder) {
-        throw new Error(`acceptOffer: createOrder succeeded but no local order row exists for offer "${offer.id}"`);
-      }
+        await appendAuditEvent(
+          tx,
+          auditParamsFromTransition(paymentTransition, {
+            sessionId: session.id,
+            payload: { offerId: offer.id, railOrderId: railOrder.id },
+            policyVersion: session.policyVersion,
+            offerId: offer.id,
+          }),
+        );
+        await updateNegotiationSession(tx, session.id, { state: paymentTransition.to });
 
-      return {
-        accepted: true,
-        reasonCode: acceptTransition.reasonCode,
-        paymentHandle: {
-          orderId: localOrder.id,
-          railOrderId: railOrder.id,
-          amountMinor: offer.totalMinor,
-          currency: "INR" as const,
-        },
-      };
+        const localOrder = await getOrderByOfferId(tx, offer.id);
+        if (!localOrder) {
+          throw new Error(`acceptOffer: createOrder succeeded but no local order row exists for offer "${offer.id}"`);
+        }
+
+        return {
+          accepted: true,
+          reasonCode: acceptTransition.reasonCode,
+          paymentHandle: {
+            orderId: localOrder.id,
+            railOrderId: railOrder.id,
+            amountMinor: offer.totalMinor,
+            currency: "INR" as const,
+          },
+        };
+      });
     }),
 });

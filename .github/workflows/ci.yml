@@ -22,6 +22,11 @@ on:
 
 env:
   DATABASE_URL: postgresql://postgres:postgres@localhost:5432/dev
+  # CI-only fixture, not a real secret — `signOfferPayload` (packages/policy/
+  # minting/signing.ts) needs SOME value here to produce a verifiable
+  # engine_signature; nothing about the invariant it protects depends on this
+  # exact value being secret in a throwaway CI Postgres + test run.
+  OFFER_SIGNING_SECRET: ci-test-signing-secret-do-not-use-in-prod
 
 jobs:
   verify:

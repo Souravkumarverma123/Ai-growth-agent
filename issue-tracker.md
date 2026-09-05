@@ -69,7 +69,7 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
-## ISSUE-012 — Three composition gaps surfaced by TICKET-204's end-to-end wiring
+## ISSUE-012 — Five composition gaps surfaced by TICKET-204's end-to-end wiring
 
 Status: OPEN (partially mitigated in TICKET-204; each sub-issue names the ticket that should actually close it)
 Severity: MEDIUM
@@ -78,11 +78,11 @@ actually drive `packages/policy` + `packages/agent` + `packages/database` +
 `packages/payments` together, end to end, against a real request)
 Violates invariant: none directly — each sub-issue is a genuine gap in how
 two already-DONE tickets compose, not a violation of a stated invariant on
-its own. (11a fails closed correctly today; it is recorded because the
+its own. (12a fails closed correctly today; it is recorded because the
 *specific* ledger entry it writes doesn't correspond to a row in the frozen
 state machine, not because money or policy integrity is at risk.)
 
-### 11a. RA-3's mid-negotiation eligibility re-check has no modeled ledger transition for its failure path
+### 12a. RA-3's mid-negotiation eligibility re-check has no modeled ledger transition for its failure path
 
 PRD §16 RA-3 requires eligibility to be re-checked once before a Tier 2 mint
 (`packages/policy/eligibility/eligibility.ts`'s own module doc says the same).
@@ -107,7 +107,7 @@ outcomes, or bless the current behavior in `PRD.md`/`CONTRACTS.md` as
 intentionally outside the table (the way `FLOOR_BREACH`'s `from: "*"` row is
 an explicitly-documented exception).
 
-### 11b. `packages/payments` cannot compose with the shared test-db harness without mocking
+### 12b. `packages/payments` cannot compose with the shared test-db harness without mocking
 
 `getOfferById`/`createOrder` (`packages/payments/src/offer-repository.ts`,
 `create-order.ts`) import `@repo/database`'s exported singleton `db` directly
@@ -128,7 +128,7 @@ test-db harness (TICKET-303, TICKET-304, TICKET-305, TICKET-306) — worth
 considering whether `getOfferById`/`createOrder` should take an optional
 `NodePgDatabase` parameter, matching every other repository in this repo.
 
-### 11c. `acceptOffer`'s frozen input schema carries no separate "basket the buyer is accepting" field
+### 12c. `acceptOffer`'s frozen input schema carries no separate "basket the buyer is accepting" field
 
 TICKET-006's frozen `acceptOffer` input is `{ negotiationId, offerId }` only
 — no basket. TICKET-111's `BASKET_MISMATCH` refusal
@@ -143,6 +143,87 @@ enforced). Not a defect in TICKET-111 or TICKET-006 individually — recording
 because a future ticket revisiting cart-drift detection at accept time will
 need to widen this input, which is itself a frozen-contract change
 (CONTRACTS.md §1) requiring lead sign-off, not a routine addition.
+
+### 12d. `propose` reads the merchant's CURRENT policy, not the session's pinned `policyVersion`, because no historical version of it is ever stored
+
+`NegotiationSession.policyVersion` (frozen, `contracts/negotiation.ts`) exists
+specifically so a session started under one set of merchant terms keeps
+negotiating under those SAME terms even if the merchant approves a policy
+change mid-negotiation — the whole point of "pinning" a version. `propose`
+(`packages/trpc/server/routes/negotiation/route.ts`) calls
+`loadMerchantNegotiationContext`, which calls `getMerchantPolicy` —
+unconditionally the merchant's live row, never filtered or joined by
+`session.policyVersion` at all.
+
+This is not a call-site oversight: `merchant_policies` (TICKET-003, frozen)
+is a single mutable row per merchant. `approveMerchantPolicy`
+(`packages/database/repositories/merchant-policies.ts`) does
+`SET policy_version = policy_version + 1` on the SAME row, in place — the
+values `maxRounds`, `offerTtlSeconds`, `concessionCurve`,
+`perDealCapMinor`, `allowedCommitments`, etc. carried at the OLD version are
+overwritten and gone the moment an approval lands. There is no
+`merchant_policy_history` table, no snapshot column anywhere, and nothing in
+the frozen schema a query could even ask for "policy as it stood at version
+N" — `propose` reading the current row is the only row that exists to read.
+
+**Impact:** identical to 12a's kill-switch case in kind, broader in scope —
+a merchant approving a policy change (tightening `maxRounds`, shortening
+`offerTtlSeconds`, changing the concession curve or per-deal cap) takes
+effect on every session CURRENTLY MID-NEGOTIATION, immediately, not just on
+sessions opened after the change. A buyer could be offered a materially
+different deal on round 3 than what round 1 promised, from the SAME
+session, with no session-side record of which terms actually applied.
+
+**NEEDS_SPEC_DECISION**: this requires a genuine data model addition, not a
+call-site fix — e.g. a `merchant_policy_history` table snapshotting the full
+policy at every `policyVersion`, or a JSONB snapshot captured onto
+`NegotiationSession` itself at `openNegotiation` time — either is a change
+to a frozen contract (CONTRACTS.md §1, TICKET-003/004) and needs lead
+sign-off on where the snapshot lives, not a decision made unilaterally
+inside this ticket's `Affected: packages/trpc` scope.
+
+### 12e. Tier 2 has no end-to-end test fixture in this suite — `propose`'s RA-3 fix is verified by reasoning, not by an integration test
+
+A code review of PR #31 found `propose`'s RA-3 re-check
+(`packages/trpc/server/routes/negotiation/route.ts`) always passed
+`isFlaggedAtRisk: isFlaggedAtRisk(session.state)` — evaluating `false`
+unconditionally, since `propose` only ever runs once `session.state ===
+"OPEN"`, and `isFlaggedAtRisk` returns true only for `"AT_RISK"`. Every Tier
+2 proposal therefore failed this re-check with `NOT_AT_RISK`, making Tier 2
+entirely unreachable. Fixed by passing `isFlaggedAtRisk: true` directly,
+with a comment proving why that's sound: `openNegotiation` only transitions
+a session to `OPEN` after `checkEligibility` already required
+`isFlaggedAtRisk(session.state) === true` (state was `AT_RISK`) at that
+time, so a currently-OPEN session was necessarily flagged at risk when it
+opened — the frozen schema just has no column still recording that once
+state has moved on.
+
+The fix itself follows deductively from that invariant, not from
+observation — but attempting to also add a live integration test (`propose`
+actually minting a Tier 2 offer, proving the re-check no longer blocks it)
+surfaced a separate, pre-existing gap: in every single-SKU test fixture
+tried, `DeterministicMerchantModel` (`packages/trpc/server/routes/
+negotiation/merchant-model.ts`) prefers a self-funding `QUANTITY_VALUE`
+candidate (buying more of the one SKU at list price, `contributionDeltaMinor
+>= 0` by construction — more units at list price always outweighs the
+fixed, smaller-quantity counterfactual) over any Tier 2 `PRICE_CONCESSION`
+candidate, every round, up to `maxRounds`. Forcing a real Tier 2 mint
+therefore needs a catalog fixture where no self-funding candidate is
+reachable at all (e.g. multiple SKUs with no further affinity add
+available, and some way to suppress quantity bumping) — building and
+verifying that catalog was not completed within this fix's scope.
+
+**Impact:** the fix is validated by precise code-tracing of the state
+machine invariant above, and by the fact that all 38 existing `@repo/trpc`
+tests plus a new database-level regression test for 12's sibling FK-ordering
+bug still pass — but no test in this repository actually drives a Tier 2
+offer through `propose` end to end. Any future change to `propose`,
+`assignTiersAndFeasibility`, or `DeterministicMerchantModel` that
+re-introduces an RA-3-style regression on the Tier 2 path would not be
+caught by the current suite. Worth a follow-up ticket building a genuine
+Tier-2-reaching fixture (likely needs `generateCandidates`'s `QUANTITY_VALUE`
+move type investigated for how to suppress or exhaust it) once TICKET-206 or
+TICKET-604 (invariant suite: payment and rail authority) need one anyway.
 
 ---
 

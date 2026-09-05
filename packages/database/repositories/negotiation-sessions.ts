@@ -46,6 +46,36 @@ export async function getNegotiationSession(
   return session;
 }
 
+/**
+ * Same read, but with `FOR UPDATE` (matching the row-lock convention already
+ * used for this exact purpose in `audit-events.ts` and, for a different row,
+ * `campaign-holds.ts`'s merchant-policy lock). Two concurrent callers racing
+ * a single session (e.g. two `propose` calls, or a `respondToOffer` and an
+ * `acceptOffer` racing the same offer's session) both read a plain, unlocked
+ * `state`/`roundIndex` here otherwise — both see it as it was BEFORE either
+ * writes, both proceed to generate/mint or accept/decline, and whichever
+ * commits last silently overwrites the other's session update, including
+ * for a session whose Tier 2 branch reserved real campaign budget. Call this
+ * (inside a transaction — the lock is released the moment the transaction
+ * ends) instead of the plain read anywhere a caller is about to write this
+ * session's `state`/`roundIndex`/`tier1Refused` later in the same request:
+ * the second concurrent caller blocks here until the first commits, then
+ * re-reads the now-current row, so its own `state !== "OPEN"` (or
+ * `!== "OFFER_PENDING"`) guard sees the real, post-write state instead of a
+ * stale snapshot.
+ */
+export async function getNegotiationSessionForUpdate(
+  database: NodePgDatabase,
+  sessionId: string,
+): Promise<SelectNegotiationSession | undefined> {
+  const [session] = await database
+    .select()
+    .from(negotiationSessionsTable)
+    .where(eq(negotiationSessionsTable.id, sessionId))
+    .for("update");
+  return session;
+}
+
 export type NegotiationSessionPatch = Partial<{
   state: NegotiationState;
   roundIndex: number;

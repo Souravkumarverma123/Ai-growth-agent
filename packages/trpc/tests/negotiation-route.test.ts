@@ -7,6 +7,7 @@ import {
   merchantPoliciesTable,
   merchantsTable,
   negotiationSessionsTable,
+  offersTable,
   ordersTable,
   skuPoliciesTable,
 } from "@repo/database/schema";
@@ -38,6 +39,11 @@ import type { SkuPolicy } from "@repo/policy/contracts";
  * this test uses, so `acceptOffer`'s follow-up `getOrderByOfferId` read still
  * finds a real row — only the Razorpay HTTP call and the cross-package
  * db-singleton mismatch are stubbed out, not the negotiation logic itself.
+ * It reads the real offer's `totalMinor`/`currency` first (the same fields
+ * the real `reserveOrder`'s `INSERT ... SELECT` derives them from,
+ * `packages/database/repositories/orders.ts`) rather than hardcoding a
+ * placeholder amount, so the local order row this test produces can never
+ * silently disagree with the offer it was authorized against.
  */
 vi.mock("@repo/payments", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/payments")>();
@@ -45,18 +51,20 @@ vi.mock("@repo/payments", async (importOriginal) => {
     ...actual,
     createOrder: vi.fn(async (offerId: string) => {
       const db = await getTestDb();
+      const [offer] = await db.select().from(offersTable).where(eq(offersTable.id, offerId));
+      if (!offer) throw new Error(`mocked createOrder: no offer found for offerId "${offerId}"`);
       const railOrderId = `rzp_test_order_${offerId.slice(0, 8)}`;
       await db.insert(ordersTable).values({
         offerId,
         railOrderId,
-        amountMinor: 0, // overwritten below via a follow-up select of the real offer row
-        currency: "INR",
+        amountMinor: offer.totalMinor,
+        currency: offer.currency,
       });
       return {
         id: railOrderId,
         entity: "order",
-        amount: 0,
-        currency: "INR",
+        amount: offer.totalMinor,
+        currency: offer.currency,
         receipt: offerId,
         status: "created",
         notes: {},

@@ -19,6 +19,17 @@ import { candidatesTable } from "../models/negotiation";
  * (== `candidateRef`), `sessionId` and `roundIndex` — assigning those is the
  * trpc route's job (deterministic `C1`, `C2`, ... per round, in generation
  * order), not this module's; this function only writes what it's given.
+ *
+ * Idempotent on `candidates_session_round_ref_idx` (session, round,
+ * candidateRef): a client retry of `propose` — before the session's own
+ * `roundIndex` has actually advanced past this round — recomputes and
+ * re-persists the SAME round. `generation/candidates.ts`'s own determinism
+ * guarantee (same input produces the identical set, every run) means that
+ * second insert is byte-for-byte the same rows, so a conflict here is
+ * semantically a no-op, never a real collision between two different
+ * candidate sets. `onConflictDoNothing` makes that true at the database
+ * level instead of letting the retry crash with an unrecoverable unique-
+ * violation, which would otherwise strand the negotiation on this round.
  */
 export async function persistCandidatesForRound(
   database: NodePgDatabase,
@@ -26,21 +37,26 @@ export async function persistCandidatesForRound(
 ): Promise<void> {
   if (candidates.length === 0) return;
 
-  await database.insert(candidatesTable).values(
-    candidates.map((candidate) => ({
-      candidateRef: candidate.candidateId,
-      sessionId: candidate.sessionId,
-      roundIndex: candidate.roundIndex,
-      moveType: candidate.moveType,
-      basket: candidate.basket,
-      totalMinor: candidate.totalMinor,
-      contributionMinor: candidate.contributionMinor,
-      contributionDeltaMinor: candidate.contributionDeltaMinor,
-      tier: candidate.tier,
-      requiredCampaignSpendMinor: candidate.requiredCampaignSpendMinor,
-      clearsSlowMoving: candidate.clearsSlowMoving,
-      feasible: candidate.feasible,
-      infeasibleReason: candidate.infeasibleReason,
-    })),
-  );
+  await database
+    .insert(candidatesTable)
+    .values(
+      candidates.map((candidate) => ({
+        candidateRef: candidate.candidateId,
+        sessionId: candidate.sessionId,
+        roundIndex: candidate.roundIndex,
+        moveType: candidate.moveType,
+        basket: candidate.basket,
+        totalMinor: candidate.totalMinor,
+        contributionMinor: candidate.contributionMinor,
+        contributionDeltaMinor: candidate.contributionDeltaMinor,
+        tier: candidate.tier,
+        requiredCampaignSpendMinor: candidate.requiredCampaignSpendMinor,
+        clearsSlowMoving: candidate.clearsSlowMoving,
+        feasible: candidate.feasible,
+        infeasibleReason: candidate.infeasibleReason,
+      })),
+    )
+    .onConflictDoNothing({
+      target: [candidatesTable.sessionId, candidatesTable.roundIndex, candidatesTable.candidateRef],
+    });
 }

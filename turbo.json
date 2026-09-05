@@ -5,10 +5,7 @@
     "SKIP_ENV_VALIDATION"
   ],
   "globalPassThroughEnv": [
-    "DATABASE_URL",
-    "GOOGLE_OAUTH_CLIENT_ID",
-    "GOOGLE_OAUTH_CLIENT_SECRET",
-    "GOOGLE_OAUTH_REDIRECT_URI"
+    "DATABASE_URL"
   ],
   "tasks": {
     "build": {
