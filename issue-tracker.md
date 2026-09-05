@@ -69,6 +69,69 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-008 — `paymentsBoundaries`' model-SDK rule mislabeled itself "B3", colliding with the real B3
+
+Status: FIXED
+Severity: LOW
+Found in: TICKET-605
+Date: 2026-09-05
+Violates invariant: none — a lint-message labeling collision, not application behaviour.
+
+### Problem
+
+`packages/eslint-config/boundaries.js`'s `paymentsBoundaries` rule (a
+defense-in-depth mirror of B1, banning a model SDK import from the
+not-yet-built `packages/payments`) had its `no-restricted-imports` message
+citing itself as `"B3 (CONTRACTS.md §2): ..."`. TICKET-605's actual scope
+item — "no order-creation function accepts an amount parameter" — is
+CONTRACTS.md §2's real, numbered B3. Building the new rule under the same
+label would have left two different rules both claiming to be "B3" in CI
+output and in this codebase's own comments, which defeats the point of the
+numbering (a reader grepping for "B3" to find CONTRACTS.md's actual
+order-creation rule would land on the wrong one first).
+
+### Expected / Actual
+
+Expected: exactly one rule in this codebase cites itself as B3, matching
+CONTRACTS.md §2's numbered list.
+Actual: two did, until this fix.
+
+### Root Cause
+
+The payments-side model-SDK mirror of B1 was written before CONTRACTS.md's
+B3 (order-creation amount parameter) had a corresponding rule in this file,
+and was labeled "B3" informally / by position rather than by checking
+CONTRACTS.md's actual numbering.
+
+### Fix
+
+Dropped the incorrect `"B3"` citation from `paymentsBoundaries`' message
+(it now reads `"CONTRACTS.md §2: ..."` with no rule letter, since it isn't
+one of the four numbered rules itself — see the comment above
+`paymentsBoundaries` in `packages/eslint-config/boundaries.js`), and
+reserved the `"B3"` label for the new `orderCreationBoundaries` rule added
+in this same ticket, which is the rule CONTRACTS.md actually numbers B3.
+
+### Regression Test
+
+`packages/eslint-config/tests/boundaries.test.ts`'s B3 `describe` block
+asserts the new `orderCreationBoundaries` rule's messages contain `"B3"`
+against three violation fixtures and does not fire on two compliant
+fixtures — see `packages/eslint-config/tests/fixtures/order-creation-*.ts`.
+
+### Related Ticket
+
+TICKET-605
+
+### Status History
+
+- 2026-09-05: OPEN — found while adding TICKET-605's order-creation B3 rule
+  and noticing the label was already in use.
+- 2026-09-05: FIXED — incorrect `"B3"` citation removed from
+  `paymentsBoundaries`; reserved for the new `orderCreationBoundaries` rule.
+
+---
+
 ## ISSUE-007 — Concurrent `packages/trpc` test files race on the shared sibling test database
 
 Status: FIXED

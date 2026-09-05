@@ -1097,7 +1097,7 @@ Good tests here assert **external behaviour**, never internal structure. "A Tier
 
 ### TICKET-605 — Static boundary checks
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-006
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-006
 
 **Objective.** Enforce two claims statically, because that is stronger than testing them.
 
