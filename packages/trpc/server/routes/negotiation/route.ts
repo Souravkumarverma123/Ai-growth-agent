@@ -429,6 +429,7 @@ export const negotiationRouter = router({
           ? {}
           : summarizeWalkAwayEconomics({
               candidates: generation.candidates,
+              tier1Refused: session.tier1Refused,
               perDealCapMinor: policy.perDealCapMinor,
               availableCampaignBudgetMinor,
             });
@@ -571,11 +572,14 @@ export const negotiationRouter = router({
             auditParamsFromTransition(transition, {
               sessionId: session.id,
               // TICKET-508 / PRD §20: the shortfall this rejected mint needed,
-              // next to the cap it broke — the walk-away card reads it back.
+              // next to both limits it was checked against — the walk-away
+              // card reads them back. `roundResult.reasonCode` (authoritative)
+              // says which limit actually bound.
               payload: {
                 candidateId: chosen.candidateId,
                 requiredCampaignSpendMinor: chosen.requiredCampaignSpendMinor,
                 perDealCapMinor: policy.perDealCapMinor,
+                availableCampaignBudgetMinor,
               },
               policyVersion: session.policyVersion,
             }),

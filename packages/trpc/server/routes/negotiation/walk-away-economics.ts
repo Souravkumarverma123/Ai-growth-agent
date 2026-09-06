@@ -27,8 +27,13 @@ export type WalkAwayEconomics = {
   /**
    * The smallest campaign top-up that would have made at least one rescue
    * basket feasible this round — i.e. the lowest `-contributionDeltaMinor`
-   * among the dilutive candidates the engine generated. `null` when the round
-   * produced no dilutive candidate at all (nothing a larger cap could rescue).
+   * among the dilutive candidates the engine generated.
+   *
+   * `null` when the round produced no dilutive candidate at all, OR when the
+   * buyer has not yet refused a Tier 1 offer (`tier1Refused` false): a Tier 2
+   * candidate stays locked out of selection until that refusal (RA-2), so no
+   * cap change could have closed the deal and there is no "what cap" figure
+   * to report.
    */
   smallestRescueShortfallMinor: number | null;
 };
@@ -53,12 +58,17 @@ export function smallestRescueShortfallMinor(
 
 export function summarizeWalkAwayEconomics(input: {
   candidates: readonly GeneratedCandidate[];
+  /** `NegotiationSession.tier1Refused` — a Tier 2 rescue is only reachable
+   *  once this is true (RA-2). */
+  tier1Refused: boolean;
   perDealCapMinor: number;
   availableCampaignBudgetMinor: number;
 }): WalkAwayEconomics {
   return {
     perDealCapMinor: input.perDealCapMinor,
     availableCampaignBudgetMinor: input.availableCampaignBudgetMinor,
-    smallestRescueShortfallMinor: smallestRescueShortfallMinor(input.candidates),
+    smallestRescueShortfallMinor: input.tier1Refused
+      ? smallestRescueShortfallMinor(input.candidates)
+      : null,
   };
 }

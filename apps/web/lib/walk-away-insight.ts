@@ -34,10 +34,11 @@ const CAP_RELATED_WALK_AWAY = new Set<string>([
 export type WalkAwayCapOutcome =
   /** A higher per-deal cap would have let the agent fund the deal. */
   | { kind: "cap-would-have-closed"; requiredCapMinor: number; perDealCapMinor: number }
-  /** The shortfall exceeded the remaining campaign budget — the cap was not
-   *  the binding limit, the budget was. */
-  | { kind: "budget-bound"; shortfallMinor: number; availableCampaignBudgetMinor: number }
-  /** A cap/budget walk-away, but this run's ledger did not record the
+  /** The campaign budget was the binding limit, not the per-deal cap. The
+   *  figures are `null` when the ledger did not record them (e.g. a
+   *  reservation-race walk-away). */
+  | { kind: "budget-bound"; shortfallMinor: number | null; availableCampaignBudgetMinor: number | null }
+  /** A cap/budget walk-away, but this run's ledger did not record a usable
    *  shortfall figure, so no "what cap" number can be shown. */
   | { kind: "shortfall-unrecorded" }
   /** The walk-away was not about a cap (round limit reached, agent ended it,
@@ -78,7 +79,11 @@ export function buildWalkAwayInsight(events: readonly LedgerEvent[]): WalkAwayIn
   const last = ordered.at(-1);
   if (!last || last.toState !== "WALKED_AWAY") return null;
 
-  const roundsNegotiated = ordered.filter((e) => e.reasonCode === "CANDIDATES_EVALUATED").length;
+  // One CANDIDATES_GENERATED event per round (PRD §8) — its reason code is
+  // CANDIDATES_EVALUATED on a feasible round and NO_FEASIBLE_BASKET on a round
+  // that walked away, so count by event type, not reason code, or the final
+  // round is lost.
+  const roundsNegotiated = ordered.filter((e) => e.eventType === "CANDIDATES_GENERATED").length;
   const offersRefused = ordered.filter((e) => e.eventType === "BUYER_DECLINES").length;
 
   const fundedSpends = ordered
@@ -96,7 +101,8 @@ export function buildWalkAwayInsight(events: readonly LedgerEvent[]): WalkAwayIn
 }
 
 function resolveCapOutcome(walkAwayEvent: LedgerEvent): WalkAwayCapOutcome {
-  if (!CAP_RELATED_WALK_AWAY.has(walkAwayEvent.reasonCode)) {
+  const reasonCode = walkAwayEvent.reasonCode;
+  if (!CAP_RELATED_WALK_AWAY.has(reasonCode)) {
     return { kind: "not-cap-related" };
   }
 
@@ -105,26 +111,35 @@ function resolveCapOutcome(walkAwayEvent: LedgerEvent): WalkAwayCapOutcome {
   const availableCampaignBudgetMinor = readNonNegativeInt(payload.availableCampaignBudgetMinor);
   // `requiredCampaignSpendMinor` — the exact shortfall of a rejected mint
   // (the MINT_ATTEMPTED path). `smallestRescueShortfallMinor` — the lowest
-  // shortfall the engine saw when a whole round produced no feasible basket.
-  // Either is "the top-up that would have closed at least one basket."
+  // shortfall the engine saw when a whole round produced no feasible basket
+  // (`null` before a Tier 1 refusal — a locked Tier 2 candidate no cap change
+  // could have reached). Either is "the top-up that would have closed a basket."
   const shortfallMinor =
     readNonNegativeInt(payload.requiredCampaignSpendMinor) ??
     readNonNegativeInt(payload.smallestRescueShortfallMinor);
 
+  // The reason code is authoritative about which limit bound (PRD §13.2).
+  if (reasonCode === "CAMPAIGN_BUDGET_EXHAUSTED") {
+    return { kind: "budget-bound", shortfallMinor, availableCampaignBudgetMinor };
+  }
+  if (reasonCode === "DILUTION_EXCEEDS_PER_DEAL_CAP") {
+    return shortfallMinor !== null && perDealCapMinor !== null
+      ? { kind: "cap-would-have-closed", requiredCapMinor: shortfallMinor, perDealCapMinor }
+      : { kind: "shortfall-unrecorded" };
+  }
+
+  // NO_FEASIBLE_BASKET — the engine does not split out which limit bound
+  // (ISSUE-022), so fall back to the recorded economics.
   if (shortfallMinor === null || perDealCapMinor === null) {
     return { kind: "shortfall-unrecorded" };
   }
-
   if (availableCampaignBudgetMinor !== null && shortfallMinor > availableCampaignBudgetMinor) {
     return { kind: "budget-bound", shortfallMinor, availableCampaignBudgetMinor };
   }
-
   if (shortfallMinor > perDealCapMinor) {
     return { kind: "cap-would-have-closed", requiredCapMinor: shortfallMinor, perDealCapMinor };
   }
-
-  // The shortfall was within the cap and within budget, yet the round still
-  // produced nothing selectable — e.g. Tier 2 was still locked (no Tier 1
-  // refusal yet). No cap change is implicated.
+  // Shortfall within both limits, yet nothing was selectable — nothing a cap
+  // change is implicated in.
   return { kind: "shortfall-unrecorded" };
 }

@@ -115,18 +115,31 @@ function CapOutcomeLine({ outcome }: { outcome: WalkAwayInsight["capOutcome"] })
           per-deal cap was the binding limit.
         </p>
       );
-    case "budget-bound":
+    case "budget-bound": {
+      const bothFigures =
+        outcome.shortfallMinor !== null &&
+        outcome.availableCampaignBudgetMinor !== null &&
+        outcome.shortfallMinor > outcome.availableCampaignBudgetMinor;
       return (
         <p
           data-testid="cap-outcome"
           data-kind={outcome.kind}
           className="text-muted-foreground rounded-md border p-3 text-sm"
         >
-          The deal needed <strong>{formatRupees(outcome.shortfallMinor)}</strong> of campaign
-          funding, but only <strong>{formatRupees(outcome.availableCampaignBudgetMinor)}</strong> was
-          left in the campaign budget. Raising the per-deal cap alone would not have closed it.
+          {bothFigures ? (
+            <>
+              The deal needed <strong>{formatRupees(outcome.shortfallMinor!)}</strong> of campaign
+              funding, but only{" "}
+              <strong>{formatRupees(outcome.availableCampaignBudgetMinor!)}</strong> was left in the
+              campaign budget.{" "}
+            </>
+          ) : (
+            <>The campaign budget was the binding limit on this deal, not the per-deal cap. </>
+          )}
+          Raising the per-deal cap alone would not have closed it.
         </p>
       );
+    }
     case "shortfall-unrecorded":
       return (
         <p

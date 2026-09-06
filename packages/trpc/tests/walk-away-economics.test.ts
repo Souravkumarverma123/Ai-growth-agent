@@ -42,10 +42,11 @@ describe("smallestRescueShortfallMinor", () => {
 });
 
 describe("summarizeWalkAwayEconomics", () => {
-  it("carries the caps through verbatim and reports the smallest rescue shortfall", () => {
+  it("carries the caps through verbatim and reports the smallest rescue shortfall once Tier 1 was refused", () => {
     expect(
       summarizeWalkAwayEconomics({
         candidates: [candidate(-30_000), candidate(-25_000)],
+        tier1Refused: true,
         perDealCapMinor: 20_000,
         availableCampaignBudgetMinor: 4_980_000,
       }),
@@ -60,6 +61,18 @@ describe("summarizeWalkAwayEconomics", () => {
     expect(
       summarizeWalkAwayEconomics({
         candidates: [candidate(10_000)],
+        tier1Refused: true,
+        perDealCapMinor: 20_000,
+        availableCampaignBudgetMinor: 4_980_000,
+      }).smallestRescueShortfallMinor,
+    ).toBeNull();
+  });
+
+  it("reports a null shortfall when Tier 1 has not been refused — a locked Tier 2 candidate no cap change could reach", () => {
+    expect(
+      summarizeWalkAwayEconomics({
+        candidates: [candidate(-30_000), candidate(-25_000)],
+        tier1Refused: false,
         perDealCapMinor: 20_000,
         availableCampaignBudgetMinor: 4_980_000,
       }).smallestRescueShortfallMinor,

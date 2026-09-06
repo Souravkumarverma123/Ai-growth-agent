@@ -36,7 +36,12 @@ function ledgerEvent(
   };
 }
 
-const WALK_AWAY_RUN: LedgerEvent[] = [
+/**
+ * The first nine events — flag → open → round 1 (bundle refused) → round 2
+ * (Tier 2 funded at the cap, then declined). Every test appends its own
+ * round-3 terminal event at sequence 9.
+ */
+const RUN_THROUGH_ROUND_2: LedgerEvent[] = [
   ledgerEvent({ sequence: 0, eventType: "ELIGIBILITY_RULES_MATCH", fromState: "IDLE", toState: "AT_RISK", reasonCode: "SESSION_FLAGGED_AT_RISK" }),
   ledgerEvent({ sequence: 1, eventType: "NEGOTIATION_REQUESTED", fromState: "AT_RISK", toState: "OPEN", reasonCode: "NEGOTIATION_OPENED" }),
   // Round 1
@@ -48,23 +53,28 @@ const WALK_AWAY_RUN: LedgerEvent[] = [
   ledgerEvent({ sequence: 6, eventType: "OFFER_MINTED", fromState: "OPEN", toState: "OFFER_PENDING", reasonCode: "DILUTION_WITHIN_CAPS", payload: { candidateId: "C2" }, campaignSpendMinor: 20_000 }),
   ledgerEvent({ sequence: 7, eventType: "BUDGET_RESERVED", fromState: "OFFER_PENDING", toState: "OFFER_PENDING", reasonCode: "HOLD_RESERVED", payload: { amountMinor: 20_000 }, campaignSpendMinor: 20_000 }),
   ledgerEvent({ sequence: 8, eventType: "BUYER_DECLINES", fromState: "OFFER_PENDING", toState: "OPEN", reasonCode: "HOLD_RELEASED", payload: { offerId: "o2" } }),
-  // Round 3 — nothing within the per-deal cap; walk away
-  ledgerEvent({ sequence: 9, eventType: "CANDIDATES_GENERATED", reasonCode: "CANDIDATES_EVALUATED", payload: { evaluatedCount: 8, selfFundingCount: 0 } }),
-  ledgerEvent({
-    sequence: 10,
-    eventType: "CANDIDATES_GENERATED",
-    fromState: "OPEN",
-    toState: "WALKED_AWAY",
-    reasonCode: "NO_FEASIBLE_BASKET",
-    payload: {
-      evaluatedCount: 8,
-      selfFundingCount: 0,
-      perDealCapMinor: 20_000,
-      availableCampaignBudgetMinor: 4_980_000,
-      smallestRescueShortfallMinor: 30_000,
-    },
-  }),
 ];
+
+/**
+ * Round 3 — the engine generates candidates, nothing clears the per-deal cap,
+ * and the CANDIDATES_GENERATED event IS the walk-away (one event per round).
+ */
+const NO_FEASIBLE_BASKET_WALK_AWAY = ledgerEvent({
+  sequence: 9,
+  eventType: "CANDIDATES_GENERATED",
+  fromState: "OPEN",
+  toState: "WALKED_AWAY",
+  reasonCode: "NO_FEASIBLE_BASKET",
+  payload: {
+    evaluatedCount: 8,
+    selfFundingCount: 0,
+    perDealCapMinor: 20_000,
+    availableCampaignBudgetMinor: 4_980_000,
+    smallestRescueShortfallMinor: 30_000,
+  },
+});
+
+const WALK_AWAY_RUN: LedgerEvent[] = [...RUN_THROUGH_ROUND_2, NO_FEASIBLE_BASKET_WALK_AWAY];
 
 describe("buildWalkAwayInsight", () => {
   it("computes every figure from the ledger for the PRD §18.2 walk-away run", () => {
@@ -82,9 +92,14 @@ describe("buildWalkAwayInsight", () => {
     });
   });
 
+  it("counts the walk-away round even though its event is NO_FEASIBLE_BASKET, not CANDIDATES_EVALUATED", () => {
+    // Only rounds 1 and 2 write a CANDIDATES_EVALUATED event; round 3 walked away.
+    expect(buildWalkAwayInsight(WALK_AWAY_RUN)!.roundsNegotiated).toBe(3);
+  });
+
   it("returns null when the session did not walk away", () => {
     const settled = [
-      ...WALK_AWAY_RUN.slice(0, 9),
+      ...RUN_THROUGH_ROUND_2,
       ledgerEvent({ sequence: 9, eventType: "BUYER_ACCEPTS", fromState: "OFFER_PENDING", toState: "ACCEPTED", reasonCode: "OFFER_ACCEPTED" }),
     ];
     expect(buildWalkAwayInsight(settled)).toBeNull();
@@ -92,14 +107,14 @@ describe("buildWalkAwayInsight", () => {
 
   it("reads the exact shortfall off the MINT_ATTEMPTED walk-away payload", () => {
     const events = [
-      ...WALK_AWAY_RUN.slice(0, 9),
+      ...RUN_THROUGH_ROUND_2,
       ledgerEvent({
         sequence: 9,
         eventType: "MINT_ATTEMPTED",
         fromState: "OPEN",
         toState: "WALKED_AWAY",
         reasonCode: "DILUTION_EXCEEDS_PER_DEAL_CAP",
-        payload: { candidateId: "C3", requiredCampaignSpendMinor: 30_000, perDealCapMinor: 20_000 },
+        payload: { candidateId: "C3", requiredCampaignSpendMinor: 30_000, perDealCapMinor: 20_000, availableCampaignBudgetMinor: 4_980_000 },
       }),
     ];
     expect(buildWalkAwayInsight(events)!.capOutcome).toEqual({
@@ -109,15 +124,35 @@ describe("buildWalkAwayInsight", () => {
     });
   });
 
-  it("reports budget-bound when the shortfall exceeds the remaining campaign budget", () => {
+  it("trusts the CAMPAIGN_BUDGET_EXHAUSTED reason code even when the payload omits the budget figure", () => {
     const events = [
-      ...WALK_AWAY_RUN.slice(0, 10),
+      ...RUN_THROUGH_ROUND_2,
       ledgerEvent({
-        sequence: 10,
-        eventType: "CANDIDATES_GENERATED",
+        sequence: 9,
+        eventType: "MINT_ATTEMPTED",
         fromState: "OPEN",
         toState: "WALKED_AWAY",
         reasonCode: "CAMPAIGN_BUDGET_EXHAUSTED",
+        // reservation-race payload: shortfall within the (stale) snapshot budget
+        payload: { candidateId: "C3", requiredCampaignSpendMinor: 30_000, perDealCapMinor: 20_000, availableCampaignBudgetMinor: 40_000 },
+      }),
+    ];
+    expect(buildWalkAwayInsight(events)!.capOutcome).toEqual({
+      kind: "budget-bound",
+      shortfallMinor: 30_000,
+      availableCampaignBudgetMinor: 40_000,
+    });
+  });
+
+  it("reports budget-bound on a NO_FEASIBLE_BASKET walk-away when the shortfall exceeds the remaining budget", () => {
+    const events = [
+      ...RUN_THROUGH_ROUND_2,
+      ledgerEvent({
+        sequence: 9,
+        eventType: "CANDIDATES_GENERATED",
+        fromState: "OPEN",
+        toState: "WALKED_AWAY",
+        reasonCode: "NO_FEASIBLE_BASKET",
         payload: { perDealCapMinor: 20_000, availableCampaignBudgetMinor: 5_000, smallestRescueShortfallMinor: 30_000 },
       }),
     ];
@@ -128,16 +163,16 @@ describe("buildWalkAwayInsight", () => {
     });
   });
 
-  it("says the shortfall was not recorded when the walk-away payload omits it", () => {
+  it("says the shortfall was not recorded when a Tier 1 refusal never happened (locked Tier 2, null shortfall)", () => {
     const events = [
-      ...WALK_AWAY_RUN.slice(0, 10),
+      ...RUN_THROUGH_ROUND_2.slice(0, 2),
       ledgerEvent({
-        sequence: 10,
+        sequence: 2,
         eventType: "CANDIDATES_GENERATED",
         fromState: "OPEN",
         toState: "WALKED_AWAY",
         reasonCode: "NO_FEASIBLE_BASKET",
-        payload: { evaluatedCount: 8, selfFundingCount: 0 },
+        payload: { perDealCapMinor: 20_000, availableCampaignBudgetMinor: 4_980_000, smallestRescueShortfallMinor: null },
       }),
     ];
     expect(buildWalkAwayInsight(events)!.capOutcome).toEqual({ kind: "shortfall-unrecorded" });
@@ -145,9 +180,9 @@ describe("buildWalkAwayInsight", () => {
 
   it("marks a round-limit walk-away as not cap-related", () => {
     const events = [
-      ...WALK_AWAY_RUN.slice(0, 10),
+      ...RUN_THROUGH_ROUND_2,
       ledgerEvent({
-        sequence: 10,
+        sequence: 9,
         eventType: "ROUND_INCREMENTED",
         fromState: "OPEN",
         toState: "WALKED_AWAY",
@@ -178,7 +213,7 @@ describe("WalkAwayInsightCardView", () => {
 
   it("shows a dash for campaign funding when no Tier 2 offer was ever minted", () => {
     const noTier2 = [
-      ...WALK_AWAY_RUN.slice(0, 5),
+      ...RUN_THROUGH_ROUND_2.slice(0, 5),
       ledgerEvent({
         sequence: 5,
         eventType: "ROUND_INCREMENTED",
