@@ -69,6 +69,59 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-018 — `apps/web` gained a jsdom component-test runner; TICKET-506 had read CONTRACTS §8 as barring one
+
+Status: OPEN
+Severity: LOW
+Found in: TICKET-502 (live negotiation event stream)
+Date: 2026-09-06
+Violates invariant: none — a testing-infrastructure judgement call.
+
+### Problem
+
+TICKET-506's implementation notes state "`apps/web` has no runner and §8
+bars a fourth seam" and, on that basis, placed its required test in
+`packages/trpc/tests/`. TICKET-502's required test — "Component renders a
+full event sequence" — is a pure render assertion with no backend at all,
+and `packages/trpc` cannot host it (no React, no DOM). So TICKET-502 added
+`vitest` + `jsdom` + `@testing-library/react` to `apps/web` and a
+`vitest.config.ts` scoped to `tests/**/*.test.{ts,tsx}`.
+
+### Resolution taken
+
+Read CONTRACTS §8 again. Its "three seams, no more" rule governs **isolating
+the negotiation engine's backend dependencies** — the tRPC/Postgres seam,
+`NegotiationModel`, `RailStateSource`. A jsdom render of a presentational
+component fakes none of those: it injects a plain `EventStreamRow[]` prop and
+asserts what the browser would paint. It does not mock the database (§8's
+explicit prohibition) because it never touches it. Treated as **not** a
+fourth seam and allowed.
+
+The split that makes this cheap: all shaping logic lives in the pure
+`apps/web/lib/event-stream.ts` (`toEventStreamRows`), and
+`MerchantEventStream` (the polling container) is separated from
+`EventStreamView` (props-only), so the test needs no tRPC/react-query
+harness.
+
+### If this is judged wrong
+
+Delete the `apps/web` runner and its five deps, keep only
+`tests/event-stream.test.ts` re-scoped to the pure `event-stream.ts`
+functions, and run it from wherever a plain `vitest` lives. The component
+would then be covered only transitively (it is a direct `.map` over
+`toEventStreamRows`).
+
+### Related Ticket
+
+TICKET-502
+
+### Status History
+
+- 2026-09-06: OPEN — recorded so the divergence from TICKET-506's reading of
+  §8 is visible, not silent.
+
+---
+
 ## ISSUE-017 — PRD §18.2's Tier 2 worked example is not reproducible by `generateCandidates` under the seeded ₹200 per-deal cap
 
 Status: NEEDS_SPEC_DECISION

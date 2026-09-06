@@ -894,21 +894,27 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-502 — Live negotiation event stream
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-404
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-404
 
 **Objective.** Let the merchant watch without approving.
 
 **Scope.** Polling-based stream of ledger events for active sessions. **Do not build SSE.**
 
 **Acceptance criteria.**
-- Events appear within a couple of seconds.
-- Reason codes are shown, not hidden behind prose.
+- Events appear within a couple of seconds. ✅ `apps/web/app/merchant/sessions/[sessionId]` polls `audit.getSessionLedger` on a 2s `refetchInterval` (react-query, `refetchIntervalInBackground: false`). No SSE.
+- Reason codes are shown, not hidden behind prose. ✅ Every row leads with the raw `reasonCode` in a monospace badge; `modelExplanation` is rendered separately and labelled "non-authoritative" (PRD §13.2). The state transition, event type, flattened payload (candidate counts, contribution/shortfall as rupees), campaign spend, offer id and policy version sit under it.
 
-**Tests required.** Component renders a full event sequence.
+**Tests required.** Component renders a full event sequence. ✅ `apps/web/tests/event-stream.test.tsx` renders `EventStreamView` with the full PRD §18.2 worked-example sequence (the 8 events TICKET-404's route test reconstructs) and asserts every reason code appears in ledger order, the model explanation is flagged non-authoritative, campaign spend shows on hold-moving events, plus empty/loading/error states — and unit-tests the pure `toEventStreamRows` shaping (ordering, rupee formatting, genesis transition, tone classification).
 
 **Affected.** `apps/web`
 
 **Parallelization.** Independent.
+
+**Implementation notes (2026-09-06).**
+- No frozen contract touched. Pure client of the existing `auditRouter` (TICKET-404); no new procedure, no output-schema change.
+- Split for testability: `apps/web/lib/event-stream.ts` holds all shaping (`toEventStreamRows`, payload flattening, reason-code tone); `MerchantEventStream` (polling container) is separated from the props-only `EventStreamView`.
+- First component-test runner in `apps/web` (`vitest` + `jsdom` + `@testing-library/react`). TICKET-506 had read CONTRACTS §8 as barring this — see **ISSUE-018** for why a props-only jsdom render is not one of §8's three backend seams.
+- Watch-only by construction: the screen has no control. The merchant's only lever mid-negotiation stays the kill switch on the policy page (RA-1).
 
 **References.** PRD §13; Settled by: Q13
 
