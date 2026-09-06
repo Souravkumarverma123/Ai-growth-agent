@@ -105,6 +105,21 @@ pnpm --filter @repo/database db:seed   # load the demo catalogue above
 pnpm dev            # apps/api + apps/web
 ```
 
+Nothing in the MVP opens a negotiation session from a UI (a real checkout
+system flags a cart `AT_RISK` and hands the buyer agent its id). To exercise
+the `apps/web` console end to end locally, create one by hand:
+
+```bash
+pnpm --filter @repo/database db:seed-session   # prints a session id + the console URLs
+```
+
+Open the buyer console it prints, send a message, then **Decline & continue**
+each offer — after round 3 the next proposal hits the round cap, the session
+ends `WALKED_AWAY`, and the walk-away card appears on that session's audit
+trail. (`db:seed-session` needs `DATABASE_URL` in the environment, same as
+`db:seed`; it never touches an existing session, so run it again for a fresh
+one.)
+
 ```bash
 pnpm check-types     # across every package
 pnpm lint            # includes the CONTRACTS.md boundary rules (e.g. the policy
