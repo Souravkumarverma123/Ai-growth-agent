@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { MerchantAuditTrail } from "./merchant-audit-trail";
+import { WalkAwayInsightCard } from "./walk-away-insight-card";
 
 /**
  * TICKET-505 — Audit trail display (PRD §13.2, §8; Q13, Q28).
@@ -43,6 +44,7 @@ export default async function MerchantAuditTrailPage({
             </Link>
           </p>
         </div>
+        <WalkAwayInsightCard sessionId={sessionId} />
         <MerchantAuditTrail sessionId={sessionId} />
       </div>
     </main>

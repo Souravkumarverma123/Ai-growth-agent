@@ -56,6 +56,7 @@ import { generatePath } from "../../utils/path-generator";
 import { loadMerchantNegotiationContext } from "./merchant-context";
 import { assignCandidateIdentity, DeterministicMerchantModel } from "./merchant-model";
 import { toPublicBasketLines, toPublicOffer } from "./public-mappers";
+import { summarizeWalkAwayEconomics } from "./walk-away-economics";
 
 /**
  * FROZEN CONTRACT — PRD.md §18, CONTRACTS.md §9. Signatures only; bodies were
@@ -417,11 +418,25 @@ export const negotiationRouter = router({
         });
 
         const generatedTransition = resolveCandidatesGeneratedTransition(tierResult);
+        // TICKET-508 / PRD §20: when this round produces no selectable basket
+        // the CANDIDATES_GENERATED event IS the walk-away event
+        // (`to: WALKED_AWAY`). Record the round's economic facts on it — the
+        // per-deal cap, the live campaign budget, and the smallest rescue
+        // shortfall the engine saw — so the merchant console's walk-away card
+        // can show what a different cap would have closed without ever
+        // hardcoding a figure. Nothing extra is written on the feasible path.
+        const walkAwayEconomics = tierResult.feasible
+          ? {}
+          : summarizeWalkAwayEconomics({
+              candidates: generation.candidates,
+              perDealCapMinor: policy.perDealCapMinor,
+              availableCampaignBudgetMinor,
+            });
         await appendAuditEvent(
           tx,
           auditParamsFromTransition(generatedTransition, {
             sessionId: session.id,
-            payload: { ...generation.counts },
+            payload: { ...generation.counts, ...walkAwayEconomics },
             policyVersion: session.policyVersion,
           }),
         );
@@ -555,7 +570,13 @@ export const negotiationRouter = router({
             tx,
             auditParamsFromTransition(transition, {
               sessionId: session.id,
-              payload: { candidateId: chosen.candidateId },
+              // TICKET-508 / PRD §20: the shortfall this rejected mint needed,
+              // next to the cap it broke — the walk-away card reads it back.
+              payload: {
+                candidateId: chosen.candidateId,
+                requiredCampaignSpendMinor: chosen.requiredCampaignSpendMinor,
+                perDealCapMinor: policy.perDealCapMinor,
+              },
               policyVersion: session.policyVersion,
             }),
           );
