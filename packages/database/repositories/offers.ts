@@ -1,10 +1,10 @@
-import { sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import { evaluateOfferAcceptance } from "@repo/policy";
 import type { Basket, ReasonCode } from "@repo/policy/contracts";
 
-import type { SelectOffer } from "../models/offer";
+import { offersTable, type SelectOffer } from "../models/offer";
 
 /**
  * TICKET-111 — offer TTL, single-use, and basket binding (PRD §10.2,
@@ -275,4 +275,30 @@ export async function acceptOffer(
 
     return { accepted: false, reasonCode: evaluation.reasonCode };
   });
+}
+
+/**
+ * TICKET-504 — offer status and TTL display.
+ *
+ * Reads every offer minted for one session, newest round first. A read
+ * function, not a mutation — it touches nothing and enforces nothing (the
+ * three refusals are still `acceptOffer`'s atomic `WHERE` alone). The
+ * merchant's watch-only offer card (`apps/web`) polls this and counts the
+ * TTL down from `expiresAt` on the client; `status` here is the frozen
+ * best-effort read-model column (`offers.status`), authoritative expiry and
+ * consumption are `expiresAt` / `consumedAt`.
+ *
+ * Drizzle's query builder (not raw `.execute()`) hands back the three
+ * `timestamp` columns as real `Date` objects, so no `toDate` normalization
+ * is needed here — see the `OfferRow` module doc for why the raw path does.
+ */
+export async function getOffersForSession(
+  database: NodePgDatabase,
+  sessionId: string,
+): Promise<SelectOffer[]> {
+  return database
+    .select()
+    .from(offersTable)
+    .where(eq(offersTable.sessionId, sessionId))
+    .orderBy(desc(offersTable.roundIndex), desc(offersTable.createdAt));
 }

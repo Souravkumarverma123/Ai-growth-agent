@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { MerchantEventStream } from "./merchant-event-stream";
 
 /**
@@ -23,6 +25,20 @@ export default async function MerchantSessionStreamPage({
           <p className="text-muted-foreground text-sm">
             Session <span className="font-mono">{sessionId}</span>. Watching only — nothing here
             changes the negotiation.
+          </p>
+          <p className="text-muted-foreground mt-2 flex gap-3 text-sm">
+            <Link
+              href={`/merchant/sessions/${sessionId}/offers`}
+              className="underline underline-offset-2"
+            >
+              Offer status →
+            </Link>
+            <Link
+              href={`/merchant/sessions/${sessionId}/audit`}
+              className="underline underline-offset-2"
+            >
+              Audit trail →
+            </Link>
           </p>
         </div>
         <MerchantEventStream sessionId={sessionId} />
