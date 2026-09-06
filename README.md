@@ -113,6 +113,18 @@ pnpm test            # includes the real-Postgres integration suites — this re
                       # convention is to never mock the database (see CONTRACTS.md §8)
 ```
 
+### Public API surfaces
+
+`apps/api` (default `http://localhost:8000`) exposes the same buyer-facing
+negotiation procedures three ways:
+
+| Path | For |
+| --- | --- |
+| `/docs` | Scalar reference for the OpenAPI document (`/openapi.json`) — the human-readable API docs, part of the submission. |
+| `/api/negotiation/*` | REST/OpenAPI surface — `open`, `propose`, `respond`, `accept`, `session/{id}`. |
+| `/trpc/*` | tRPC surface for typed TypeScript clients. |
+| `/mcp` | **Model Context Protocol** endpoint (stateless Streamable HTTP). A third-party buyer agent that speaks MCP can negotiate end to end with no bespoke integration — the five negotiation calls are exposed as MCP tools. Thin adapter over the procedures above; leaks no floor, budget, cap, or curve. |
+
 ## Status
 
 30 of 46 planned tickets are done — the deterministic policy engine, the audit ledger, and the negotiation API are fully built and tested; remaining work is concentrated in the buyer-facing agent harness, the payment-reconciliation loop, and the merchant console UI. See `Tickets.md` for the ticket-by-ticket breakdown.

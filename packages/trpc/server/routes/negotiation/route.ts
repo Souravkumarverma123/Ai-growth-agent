@@ -115,6 +115,37 @@ const publicOfferSchema = z.object({
   message: z.string(),
 });
 
+/**
+ * The buyer-facing input schemas, named and exported so the MCP adapter
+ * (`packages/trpc/server/mcp/`, TICKET-205) can reuse the exact same shapes
+ * instead of re-declaring them — that adapter stays a genuine thin
+ * pass-through, and there is no second definition to drift from this one.
+ *
+ * Exporting these is not a frozen-contract change: the shapes are unchanged,
+ * still the narrow buyer-facing surface CONTRACTS.md §9 governs. Each
+ * procedure below passes its member straight to `.input()`.
+ */
+export const negotiationInputSchemas = {
+  getSessionContext: z.object({ sessionId: z.string() }),
+  openNegotiation: z.object({
+    sessionId: z.string(),
+    buyerAgentId: z.string().min(1),
+  }),
+  propose: z.object({
+    negotiationId: z.string(),
+    message: z.string().max(2000),
+  }),
+  respondToOffer: z.object({
+    negotiationId: z.string(),
+    offerId: z.string(),
+    response: z.enum(["DECLINE_AND_CONTINUE", "WALK_AWAY"]),
+  }),
+  acceptOffer: z.object({
+    negotiationId: z.string(),
+    offerId: z.string(),
+  }),
+} as const;
+
 // ---------------------------------------------------------------------------
 // Small shared helpers
 // ---------------------------------------------------------------------------
@@ -241,7 +272,7 @@ type AcceptOfferTxResult =
 export const negotiationRouter = router({
   getSessionContext: publicProcedure
     .meta({ openapi: { method: "GET", path: getPath("/session/{sessionId}"), tags: TAGS } })
-    .input(z.object({ sessionId: z.string() }))
+    .input(negotiationInputSchemas.getSessionContext)
     .output(
       z.object({
         sessionId: z.string(),
@@ -271,12 +302,7 @@ export const negotiationRouter = router({
    */
   openNegotiation: publicProcedure
     .meta({ openapi: { method: "POST", path: getPath("/open"), tags: TAGS } })
-    .input(
-      z.object({
-        sessionId: z.string(),
-        buyerAgentId: z.string().min(1),
-      }),
-    )
+    .input(negotiationInputSchemas.openNegotiation)
     .output(
       z.object({
         negotiationId: z.string(),
@@ -328,12 +354,7 @@ export const negotiationRouter = router({
   /** The buyer agent states constraints or counters; the merchant agent replies. */
   propose: publicProcedure
     .meta({ openapi: { method: "POST", path: getPath("/propose"), tags: TAGS } })
-    .input(
-      z.object({
-        negotiationId: z.string(),
-        message: z.string().max(2000),
-      }),
-    )
+    .input(negotiationInputSchemas.propose)
     .output(
       z.object({
         roundIndex: z.number().int(),
@@ -596,13 +617,7 @@ export const negotiationRouter = router({
 
   respondToOffer: publicProcedure
     .meta({ openapi: { method: "POST", path: getPath("/respond"), tags: TAGS } })
-    .input(
-      z.object({
-        negotiationId: z.string(),
-        offerId: z.string(),
-        response: z.enum(["DECLINE_AND_CONTINUE", "WALK_AWAY"]),
-      }),
-    )
+    .input(negotiationInputSchemas.respondToOffer)
     .output(
       z.object({
         roundIndex: z.number().int(),
@@ -696,12 +711,7 @@ export const negotiationRouter = router({
    */
   acceptOffer: publicProcedure
     .meta({ openapi: { method: "POST", path: getPath("/accept"), tags: TAGS } })
-    .input(
-      z.object({
-        negotiationId: z.string(),
-        offerId: z.string(),
-      }),
-    )
+    .input(negotiationInputSchemas.acceptOffer)
     .output(
       z.object({
         accepted: z.boolean(),
