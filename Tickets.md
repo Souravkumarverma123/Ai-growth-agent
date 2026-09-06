@@ -975,20 +975,21 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-505 — Audit trail display
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-404
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-404
 
 **Objective.** The screen a judge will look at.
 
 **Scope.** Chronological events with reason code, structured payload, and the model explanation shown as clearly non-authoritative. Chain verification indicator. Candidate counts surfaced (`evaluated / feasible / tier-1`).
 
 **Acceptance criteria.**
-- Every event shows its reason code prominently.
-- The explanation is visually distinguished from the justification.
-- Chain validity is displayed.
+- Every event shows its reason code prominently. ✅ `apps/web/app/merchant/sessions/[sessionId]/audit` reads `audit.getSessionLedger` + `audit.verifyChain` and renders each event with a labelled "Justification" + the raw `reasonCode` badge as the loudest thing in the row (shared `<ReasonCodeBadge>`, same primitive TICKET-502's stream uses). Shaping is pure in `apps/web/lib/audit-trail.ts`, reusing TICKET-502's `toEventStreamRows` verbatim.
+- The explanation is visually distinguished from the justification. ✅ `modelExplanation` renders in a separate dashed-border block headed "Model explanation · non-authoritative · not consulted by any decision", italic, never adjacent to the reason code; events with no explanation render no block.
+- Chain validity is displayed. ✅ A prominent chain-verification indicator (`summarizeChain`) shows verified / broken (naming the first bad sequence) / empty, the event count, and always the PRD §13.3 self-anchored disclosure — "internally consistent, not tamper-proof against database write access".
+- Candidate counts surfaced. ✅ A "Candidate space searched" panel pulls `evaluated / feasible / Tier 1` out of the `CANDIDATES_EVALUATED` event (`extractCandidateCounts`, tolerant of both the spec-shaped `evaluated/feasible/tier1` payload and the deployed engine's `evaluatedCount/selfFundingCount`). A count the ledger did not record shows "—" with a note, never a fabricated number — see ISSUE-021 for the deployed-engine payload gap.
 
-**Tests required.** Renders the full worked-example run.
+**Tests required.** Renders the full worked-example run. ✅ `apps/web/tests/audit-trail.test.tsx` (17 tests) renders `AuditTrailView` over the PRD §18.2 worked example (same sequence as TICKET-404's ledger-route test): every reason code in order, chain indicator + self-anchored disclosure, candidate counts `12 / 9 / 4`, explanation block distinct from the justification, plus `extractCandidateCounts` / `summarizeChain` unit cases (newest-round selection, fractional/negative-count rejection), the "chain verification unreachable" state, and the loading/error states. props-only jsdom render (ISSUE-018), no new backend seam.
 
-**Affected.** `apps/web`
+**Affected.** `apps/web` (also extracted the shared merchant poll-card shell per ISSUE-019 and retrofitted TICKET-502 / TICKET-503 onto it — no behaviour change, their suites are unchanged and green)
 
 **Parallelization.** Independent after TICKET-404.
 

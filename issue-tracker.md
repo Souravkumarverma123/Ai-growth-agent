@@ -69,6 +69,76 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-021 — the deployed engine's `CANDIDATES_EVALUATED` ledger payload omits the `feasible` count that PRD §8 says it records
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-505 (audit trail display)
+Date: 2026-09-06
+Violates invariant: none in PRD §21 — but it contradicts PRD §8's explicit
+statement that "the ledger records the counts — evaluated, feasible, Tier 1".
+
+### Problem
+
+PRD §8: *"The ledger records the counts — evaluated, feasible, Tier 1. That
+single line forecloses 'how do you know there wasn't a better deal?'"*
+
+The deployed write path records only two of the three. In
+`packages/trpc/server/routes/negotiation/route.ts` the `CANDIDATES_EVALUATED`
+event is written with `payload: { ...generation.counts }`, and
+`generation.counts` (`packages/policy/generation/candidates.ts`,
+`CandidateGenerationCounts`) is `{ evaluatedCount, selfFundingCount,
+byMoveType }`. So:
+
+- **evaluated** → `evaluatedCount` ✅
+- **Tier 1** → `selfFundingCount` (candidates with `contributionDelta >= 0`);
+  close enough — its own doc-comment calls it "the raw material for what
+  TICKET-104 will call 'Tier 1 feasible'" ✅ (modulo the rename)
+- **feasible** → not written at all ❌
+
+The feasible count (Tier 1 feasible + Tier 2 feasible-within-caps) exists at
+write time — it is derivable from `assignTiersAndFeasibility`'s result — but
+that result is not folded into the event payload. On the
+`NO_FEASIBLE_BASKET` branch `assignTiersAndFeasibility` returns only
+`{ feasible: false, reasonCode }` with no candidate array, so a fix has to
+decide what the feasible count is there (0) too.
+
+Separately, the hand-authored worked-example fixtures
+(`packages/trpc/tests/audit-route.test.ts`,
+`apps/web/tests/event-stream.test.tsx`) use a *different* payload shape —
+`{ evaluated, feasible, tier1 }` — which no production code writes. So there
+are two shapes in the tree and neither is a superset of the other.
+
+### Impact
+
+TICKET-505's audit screen surfaces candidate counts for the judge.
+`extractCandidateCounts` (`apps/web/lib/audit-trail.ts`) reads both shapes
+(`evaluated`/`evaluatedCount`, `feasible`/`feasibleCount`,
+`tier1`/`tier1Count`/`selfFundingCount`); on real deployed data it therefore
+shows **evaluated** and **Tier 1** but renders **feasible** as "—" with a
+"not recorded" note. It never fabricates the missing number.
+
+### Fix
+
+Not done here — out of TICKET-505's `apps/web` scope, and it touches the
+`CANDIDATES_EVALUATED` write in `packages/trpc` (and possibly the
+`CandidateGenerationCounts` type in `packages/policy`). Its own small ticket:
+extend the recorded payload to carry an explicit `feasibleCount` (and settle
+the key names — `evaluated` / `feasible` / `tier1` per §8, vs the current
+`…Count` suffixes), update the two fixture files to the real shape, and
+tighten `extractCandidateCounts` once one shape is canonical.
+
+### Related Ticket
+
+TICKET-505 (found), TICKET-103 / TICKET-104 (counts origin), TICKET-404 (the
+read API), TICKET-204 (the write path)
+
+### Status History
+
+- 2026-09-06: OPEN — recorded while building the TICKET-505 candidate-counts panel.
+
+---
+
 ## ISSUE-020 — the whole merchant tRPC surface is `publicProcedure` with `merchantId` as an input — any caller can read/write any merchant
 
 Status: OPEN
@@ -107,22 +177,33 @@ change to frozen router signatures (CONTRACTS.md §1/§11.2) and needs lead
 sign-off on the auth mechanism. The buyer-facing surface has the same shape
 and should be reviewed in the same pass.
 
+The **audit** router (`packages/trpc/server/routes/audit/route.ts` —
+`getSessionLedger`, `verifyChain`) has the same shape: `publicProcedure`
+keyed only by `sessionId`, no auth. TICKET-502's live event stream and
+TICKET-505's audit trail both consume it, so a guessed `sessionId` exposes a
+session's full ledger — reason codes, model explanations, offer ids, campaign
+spend. Same frozen-signature auth pass, same deferral.
+
 Acceptable for the MVP demo as-is (single seed merchant, no real merchant
 data), but must not ship to real merchants without this.
 
 ### Related Ticket
 
-TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern)
+TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern),
+TICKET-502 / TICKET-505 (audit router, same shape — CodeAnt flagged on PR #45)
 
 ### Status History
 
 - 2026-09-06: OPEN — recorded from a CodeAnt review comment on PR #44.
+- 2026-09-06: still OPEN — CodeAnt flagged the same class on PR #45's audit
+  route; folded the audit router into this issue rather than opening a
+  duplicate.
 
 ---
 
 ## ISSUE-019 — `apps/web` merchant "watch" screens are copying the same poll-card chrome per ticket
 
-Status: OPEN
+Status: FIXED (TICKET-505)
 Severity: LOW
 Found in: TICKET-503 (campaign budget countdown)
 Date: 2026-09-06
@@ -142,12 +223,20 @@ TICKET-504 (offer status / TTL) and TICKET-505 (audit trail) are both more
 
 ### Fix
 
-Not done here — extracting a shared `<PollCard>` (or a `useMerchantPoll`
-hook) is its own small refactor and pulling it out mid-TICKET-503 would grow
-this PR past its ticket. Whoever picks up TICKET-504 or TICKET-505 should
-extract the shell first and retrofit 502/503, rather than adding a third
-copy. The pure shaping split (`lib/event-stream.ts`, `lib/campaign-budget.ts`)
-is already shared-by-pattern and is not the duplication in question.
+Done in TICKET-505. `apps/web/components/merchant/poll-card.tsx` holds the
+shared chrome once: `MERCHANT_POLL_INTERVAL_MS` / `…_SECONDS`, `pollStatus()`
+(flags → "Live" / "Refreshing" / "Settled"), `<PollCard>` (the `Card` +
+`CardHeader` with the spinning `RefreshCw` + `aria-live` status line),
+`<PollError>` (the `AlertCircle` line, `md` full-panel + `sm` stale-refresh
+sizes) and `<PollLastChecked>` (the footer). The reason-code badge — the
+shared "justification" primitive — moved to
+`apps/web/components/merchant/reason-code-badge.tsx`.
+
+TICKET-502 (`merchant-event-stream.tsx`) and TICKET-503
+(`campaign-budget-countdown.tsx`) were retrofitted onto it with no DOM/behaviour
+change — both suites pass untouched. Each screen still owns its own tRPC query,
+`refetchInterval` policy, and blank-vs-keep-last-good error choice; only the
+chrome is shared.
 
 ### Related Ticket
 
@@ -156,6 +245,9 @@ TICKET-502, TICKET-503, TICKET-504, TICKET-505
 ### Status History
 
 - 2026-09-06: OPEN — recorded when TICKET-503's second copy landed.
+- 2026-09-06: FIXED — shared `poll-card.tsx` + `reason-code-badge.tsx`
+  extracted in TICKET-505; 502 and 503 retrofitted. TICKET-504 should build on
+  the same shell.
 
 ---
 

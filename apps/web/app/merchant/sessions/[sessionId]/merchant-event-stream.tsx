@@ -1,26 +1,25 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertCircle, CircleDot, RefreshCw } from "lucide-react";
+import { CircleDot } from "lucide-react";
 
 import { trpc } from "~/trpc/client";
-import { cn } from "~/lib/utils";
 import { formatRupees } from "~/lib/money";
 import {
   isStreamSettled,
   toEventStreamRows,
   type EventStreamRow,
   type PayloadField,
-  type ReasonTone,
 } from "~/lib/event-stream";
-import { Badge } from "~/components/ui/badge";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "~/components/ui/card";
+  MERCHANT_POLL_INTERVAL_MS,
+  MERCHANT_POLL_INTERVAL_SECONDS,
+  PollCard,
+  PollError,
+  PollLastChecked,
+  pollStatus,
+} from "~/components/merchant/poll-card";
+import { ReasonCodeBadge } from "~/components/merchant/reason-code-badge";
 import { Separator } from "~/components/ui/separator";
 
 /**
@@ -33,15 +32,6 @@ import { Separator } from "~/components/ui/separator";
  * polling stops once the session reaches a terminal state.
  */
 
-const POLL_INTERVAL_MS = 2_000;
-
-const TONE_CLASS: Record<ReasonTone, string> = {
-  positive: "border-transparent bg-emerald-600 text-white dark:bg-emerald-500/80",
-  negative: "border-transparent bg-destructive text-white dark:bg-destructive/70",
-  warning: "border-transparent bg-amber-500 text-white dark:bg-amber-500/80",
-  neutral: "border-transparent bg-secondary text-secondary-foreground",
-};
-
 export function MerchantEventStream({ sessionId }: { sessionId: string }) {
   const query = trpc.audit.getSessionLedger.useQuery(
     { sessionId },
@@ -51,7 +41,7 @@ export function MerchantEventStream({ sessionId }: { sessionId: string }) {
       // `refetchIntervalInBackground: false` also parks it for a hidden tab.
       refetchInterval: (q) => {
         const events = q.state.data?.events;
-        return events && isStreamSettled(events) ? false : POLL_INTERVAL_MS;
+        return events && isStreamSettled(events) ? false : MERCHANT_POLL_INTERVAL_MS;
       },
       refetchIntervalInBackground: false,
       staleTime: 0,
@@ -102,52 +92,36 @@ export function EventStreamView({
   lastUpdatedAt?: number;
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <CardTitle className="text-base">Live event stream</CardTitle>
-            <CardDescription>
-              Every ledger event for this session, in order. Reason codes are shown exactly as the
-              engine wrote them. Refreshes every {Math.round(POLL_INTERVAL_MS / 1000)}s while the
-              negotiation is live — you are watching, not approving.
-            </CardDescription>
-          </div>
-          <span
-            className="text-muted-foreground inline-flex shrink-0 items-center gap-1 text-xs"
-            aria-live="polite"
-          >
-            <RefreshCw className={cn("size-3", isFetching && "animate-spin")} />
-            {isSettled ? "Settled" : isFetching ? "Refreshing" : "Live"}
-          </span>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {isError ? (
-          <p className="text-destructive flex items-center gap-2 text-sm">
-            <AlertCircle className="size-4" />
-            Could not load the event stream{errorMessage ? `: ${errorMessage}` : "."}
-          </p>
-        ) : isLoading ? (
-          <p className="text-muted-foreground text-sm">Loading events…</p>
-        ) : rows.length === 0 ? (
-          <p className="text-muted-foreground text-sm">
-            No events yet. They will appear here as the negotiation progresses.
-          </p>
-        ) : (
-          <ol className="flex flex-col gap-3">
-            {rows.map((row) => (
-              <EventRow key={row.key} row={row} />
-            ))}
-          </ol>
-        )}
-        {!isError && lastUpdatedAt > 0 && (
-          <p className="text-muted-foreground mt-4 text-[11px]">
-            Last checked {new Date(lastUpdatedAt).toLocaleTimeString()}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+    <PollCard
+      title="Live event stream"
+      description={
+        <>
+          Every ledger event for this session, in order. Reason codes are shown exactly as the
+          engine wrote them. Refreshes every {MERCHANT_POLL_INTERVAL_SECONDS}s while the negotiation
+          is live — you are watching, not approving.
+        </>
+      }
+      status={pollStatus(isFetching, isSettled)}
+    >
+      {isError ? (
+        <PollError>
+          Could not load the event stream{errorMessage ? `: ${errorMessage}` : "."}
+        </PollError>
+      ) : isLoading ? (
+        <p className="text-muted-foreground text-sm">Loading events…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          No events yet. They will appear here as the negotiation progresses.
+        </p>
+      ) : (
+        <ol className="flex flex-col gap-3">
+          {rows.map((row) => (
+            <EventRow key={row.key} row={row} />
+          ))}
+        </ol>
+      )}
+      {!isError && <PollLastChecked at={lastUpdatedAt} />}
+    </PollCard>
   );
 }
 
@@ -170,9 +144,7 @@ function EventRow({ row }: { row: EventStreamRow }) {
           <CircleDot className="size-3" />#{row.sequence}
         </span>
         {/* THE JUSTIFICATION — raw reason code, most prominent thing in the row. */}
-        <Badge className={cn("font-mono text-[11px] tracking-tight", TONE_CLASS[row.tone])}>
-          {row.reasonCode}
-        </Badge>
+        <ReasonCodeBadge code={row.reasonCode} tone={row.tone} />
         <span className="text-muted-foreground font-mono text-[11px]">{row.transition}</span>
         <span className="text-muted-foreground ml-auto text-[11px]">
           {new Date(row.timestampIso).toLocaleTimeString()}
