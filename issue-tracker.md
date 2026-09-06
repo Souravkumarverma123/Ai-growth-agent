@@ -98,10 +98,18 @@ explicit prohibition) because it never touches it. Treated as **not** a
 fourth seam and allowed.
 
 The split that makes this cheap: all shaping logic lives in the pure
-`apps/web/lib/event-stream.ts` (`toEventStreamRows`), and
+`apps/web/lib/event-stream.ts` (`toEventStreamRows`, `isStreamSettled`), and
 `MerchantEventStream` (the polling container) is separated from
 `EventStreamView` (props-only), so the test needs no tRPC/react-query
 harness.
+
+Note: `apps/web` also gained a real dependency on `@repo/policy` in this
+ticket (for the frozen `ReasonCode` / `TERMINAL_STATES` contracts — a
+type-only import for the enum, a tiny const for the states). That is the
+intended use of the pure contracts package and is not a boundary violation
+(CONTRACTS §2 restricts what `policy` / `agent` / `payments` may import, not
+what may import `policy`), but it is the first non-`@repo/trpc` workspace
+import in the web app, so it is called out here alongside the runner.
 
 ### If this is judged wrong
 

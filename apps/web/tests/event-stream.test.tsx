@@ -2,7 +2,13 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { EventStreamView } from "~/app/merchant/sessions/[sessionId]/merchant-event-stream";
-import { flattenPayload, reasonTone, toEventStreamRows, type LedgerEvent } from "~/lib/event-stream";
+import {
+  flattenPayload,
+  isStreamSettled,
+  reasonTone,
+  toEventStreamRows,
+  type LedgerEvent,
+} from "~/lib/event-stream";
 
 /**
  * TICKET-502 — "Component renders a full event sequence."
@@ -12,7 +18,9 @@ import { flattenPayload, reasonTone, toEventStreamRows, type LedgerEvent } from 
  * buyer refuses → tier 2 within caps → hold reserved → buyer accepts.
  */
 
-function ledgerEvent(overrides: Partial<LedgerEvent> & Pick<LedgerEvent, "sequence" | "reasonCode">): LedgerEvent {
+function ledgerEvent(
+  overrides: Partial<LedgerEvent> & Pick<LedgerEvent, "sequence" | "reasonCode">,
+): LedgerEvent {
   return {
     eventId: `evt-${overrides.sequence}`,
     timestamp: new Date(Date.UTC(2026, 8, 6, 10, 0, overrides.sequence)).toISOString(),
@@ -128,23 +136,23 @@ describe("toEventStreamRows", () => {
     expect(second!.transition).toBe("AT_RISK → OPEN");
   });
 
-  it("formats minor-unit payload amounts as rupees and drops the Minor suffix", () => {
+  it("keeps minor-unit payload amounts in paise and drops the Minor suffix from the label", () => {
     const rows = toEventStreamRows(WORKED_EXAMPLE);
     const tier1 = rows.find((r) => r.reasonCode === "TIER1_OFFERED")!;
-    expect(tier1.payloadFields).toContainEqual({ label: "Total", value: "₹3,020.00" });
+    expect(tier1.payloadFields).toContainEqual({ label: "Total", amountMinor: 302_000 });
 
     const dilution = rows.find((r) => r.reasonCode === "DILUTION_WITHIN_CAPS")!;
-    expect(dilution.payloadFields).toContainEqual({ label: "Shortfall", value: "₹200.00" });
-    expect(dilution.campaignSpendLabel).toBe("₹200.00");
+    expect(dilution.payloadFields).toContainEqual({ label: "Shortfall", amountMinor: 20_000 });
+    expect(dilution.campaignSpendMinor).toBe(20_000);
   });
 
-  it("keeps candidate counts as plain integers", () => {
+  it("keeps candidate counts as plain integer text", () => {
     const rows = toEventStreamRows(WORKED_EXAMPLE);
     const evaluated = rows.find((r) => r.reasonCode === "CANDIDATES_EVALUATED")!;
     expect(evaluated.payloadFields).toEqual([
-      { label: "Evaluated", value: "12" },
-      { label: "Feasible", value: "9" },
-      { label: "Tier1", value: "4" },
+      { label: "Evaluated", text: "12" },
+      { label: "Feasible", text: "9" },
+      { label: "Tier1", text: "4" },
     ]);
   });
 
@@ -155,6 +163,24 @@ describe("toEventStreamRows", () => {
   });
 });
 
+describe("isStreamSettled", () => {
+  it("is false while the last event is non-terminal, true once it is terminal", () => {
+    expect(isStreamSettled([])).toBe(false);
+    expect(isStreamSettled(WORKED_EXAMPLE.slice(0, 3))).toBe(false);
+
+    const walkedAway = [
+      ...WORKED_EXAMPLE.slice(0, 5),
+      ledgerEvent({
+        sequence: 5,
+        reasonCode: "DILUTION_EXCEEDS_PER_DEAL_CAP",
+        fromState: "OPEN",
+        toState: "WALKED_AWAY",
+      }),
+    ];
+    expect(isStreamSettled(walkedAway)).toBe(true);
+  });
+});
+
 describe("reasonTone", () => {
   it("classifies acceptance as positive and a cap breach as negative", () => {
     expect(reasonTone("OFFER_ACCEPTED")).toBe("positive");
@@ -162,13 +188,14 @@ describe("reasonTone", () => {
     expect(reasonTone("WALK_AWAY")).toBe("negative");
     expect(reasonTone("OFFER_EXPIRED")).toBe("warning");
     expect(reasonTone("NEGOTIATION_OPENED")).toBe("neutral");
+    expect(reasonTone("SOMETHING_UNKNOWN")).toBe("neutral");
   });
 });
 
 describe("flattenPayload", () => {
   it("stringifies nested structures rather than dropping them", () => {
     expect(flattenPayload({ hold: { id: "h1", amountMinor: 500 } })).toEqual([
-      { label: "Hold", value: '{"id":"h1","amountMinor":500}' },
+      { label: "Hold", text: '{"id":"h1","amountMinor":500}' },
     ]);
   });
 });
@@ -185,6 +212,12 @@ describe("EventStreamView", () => {
     }
   });
 
+  it("formats payload amounts as rupees at the render boundary", () => {
+    render(<EventStreamView rows={toEventStreamRows(WORKED_EXAMPLE)} />);
+    const tier1Row = document.querySelector('li[data-reason-code="TIER1_OFFERED"]')!;
+    expect(within(tier1Row as HTMLElement).getByText("₹3,020.00")).toBeInTheDocument();
+  });
+
   it("shows the model explanation flagged as non-authoritative", () => {
     render(<EventStreamView rows={toEventStreamRows(WORKED_EXAMPLE)} />);
 
@@ -198,11 +231,14 @@ describe("EventStreamView", () => {
   it("shows campaign spend on the events that moved a hold", () => {
     render(<EventStreamView rows={toEventStreamRows(WORKED_EXAMPLE)} />);
 
-    const holdRow = document.querySelector('li[data-reason-code="HOLD_RESERVED"]')!;
-    // Both the payload amount and the campaign-spend column show the figure.
-    const dilutionRow = within(holdRow as HTMLElement);
-    expect(dilutionRow.getByText("Campaign spend")).toBeInTheDocument();
-    expect(dilutionRow.getAllByText("₹200.00").length).toBeGreaterThanOrEqual(1);
+    const holdRow = within(document.querySelector('li[data-reason-code="HOLD_RESERVED"]')! as HTMLElement);
+    expect(holdRow.getByText("Campaign spend")).toBeInTheDocument();
+    expect(holdRow.getAllByText("₹200.00").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("reports a settled session instead of 'Live'", () => {
+    render(<EventStreamView rows={toEventStreamRows(WORKED_EXAMPLE)} isSettled />);
+    expect(screen.getByText("Settled")).toBeInTheDocument();
   });
 
   it("renders empty, loading and error states without any rows", () => {

@@ -4,9 +4,12 @@ import { AlertCircle, CircleDot, RefreshCw } from "lucide-react";
 
 import { trpc } from "~/trpc/client";
 import { cn } from "~/lib/utils";
+import { formatRupees } from "~/lib/money";
 import {
+  isStreamSettled,
   toEventStreamRows,
   type EventStreamRow,
+  type PayloadField,
   type ReasonTone,
 } from "~/lib/event-stream";
 import { Badge } from "~/components/ui/badge";
@@ -25,7 +28,8 @@ import { Separator } from "~/components/ui/separator";
  * Poll-based, not SSE (the ticket is explicit: "Do not build SSE"). The
  * merchant watches a session's ledger without any ability to approve or
  * intervene — every row is already-committed history read back from
- * `audit.getSessionLedger`. New events show up within one poll interval.
+ * `audit.getSessionLedger`. New events show up within one poll interval;
+ * polling stops once the session reaches a terminal state.
  */
 
 const POLL_INTERVAL_MS = 2_000;
@@ -41,9 +45,13 @@ export function MerchantEventStream({ sessionId }: { sessionId: string }) {
   const query = trpc.audit.getSessionLedger.useQuery(
     { sessionId },
     {
-      // The polling loop. `refetchIntervalInBackground: false` keeps a
-      // backgrounded tab quiet; a watching merchant has it foregrounded.
-      refetchInterval: POLL_INTERVAL_MS,
+      // The polling loop. Stops itself once the session is terminal — a
+      // finished negotiation is no longer an "active session" to watch.
+      // `refetchIntervalInBackground: false` also parks it for a hidden tab.
+      refetchInterval: (q) => {
+        const events = q.state.data?.events;
+        return events && isStreamSettled(events) ? false : POLL_INTERVAL_MS;
+      },
       refetchIntervalInBackground: false,
       staleTime: 0,
     },
@@ -58,6 +66,7 @@ export function MerchantEventStream({ sessionId }: { sessionId: string }) {
       isError={query.isError}
       errorMessage={query.error?.message ?? null}
       isFetching={query.isFetching}
+      isSettled={rows.length > 0 && isStreamSettled(query.data?.events ?? [])}
       lastUpdatedAt={query.dataUpdatedAt}
     />
   );
@@ -74,6 +83,7 @@ export function EventStreamView({
   isError = false,
   errorMessage = null,
   isFetching = false,
+  isSettled = false,
   lastUpdatedAt = 0,
 }: {
   rows: EventStreamRow[];
@@ -81,6 +91,7 @@ export function EventStreamView({
   isError?: boolean;
   errorMessage?: string | null;
   isFetching?: boolean;
+  isSettled?: boolean;
   lastUpdatedAt?: number;
 }) {
   return (
@@ -90,9 +101,9 @@ export function EventStreamView({
           <div>
             <CardTitle className="text-base">Live event stream</CardTitle>
             <CardDescription>
-              Every ledger event for this session, newest last. Reason codes are shown exactly as
-              the engine wrote them. Updates every {Math.round(POLL_INTERVAL_MS / 1000)}s — you are
-              watching, not approving.
+              Every ledger event for this session, in order. Reason codes are shown exactly as the
+              engine wrote them. Refreshes every {Math.round(POLL_INTERVAL_MS / 1000)}s while the
+              negotiation is live — you are watching, not approving.
             </CardDescription>
           </div>
           <span
@@ -100,7 +111,7 @@ export function EventStreamView({
             aria-live="polite"
           >
             <RefreshCw className={cn("size-3", isFetching && "animate-spin")} />
-            {isFetching ? "Refreshing" : "Live"}
+            {isSettled ? "Settled" : isFetching ? "Refreshing" : "Live"}
           </span>
         </div>
       </CardHeader>
@@ -133,7 +144,18 @@ export function EventStreamView({
   );
 }
 
+function PayloadValue({ field }: { field: PayloadField }) {
+  // The one place a payload amount becomes rupees (CONTRACTS.md §3).
+  return <dd className="font-mono">{"amountMinor" in field ? formatRupees(field.amountMinor) : field.text}</dd>;
+}
+
 function EventRow({ row }: { row: EventStreamRow }) {
+  const hasMeta =
+    row.payloadFields.length > 0 ||
+    row.campaignSpendMinor !== null ||
+    row.offerId !== null ||
+    row.policyVersion !== null;
+
   return (
     <li className="rounded-md border p-3" data-reason-code={row.reasonCode}>
       <div className="flex flex-wrap items-center gap-2">
@@ -145,26 +167,25 @@ function EventRow({ row }: { row: EventStreamRow }) {
           {row.reasonCode}
         </Badge>
         <span className="text-muted-foreground font-mono text-[11px]">{row.transition}</span>
-        <span className="text-muted-foreground ml-auto text-[11px]">{row.timestampLabel}</span>
+        <span className="text-muted-foreground ml-auto text-[11px]">
+          {new Date(row.timestampIso).toLocaleTimeString()}
+        </span>
       </div>
 
       <div className="text-muted-foreground mt-1 font-mono text-[11px]">{row.eventType}</div>
 
-      {(row.payloadFields.length > 0 ||
-        row.campaignSpendLabel !== null ||
-        row.offerId !== null ||
-        row.policyVersion !== null) && (
+      {hasMeta && (
         <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
           {row.payloadFields.map((field) => (
             <div key={field.label} className="contents">
               <dt className="text-muted-foreground">{field.label}</dt>
-              <dd className="font-mono">{field.value}</dd>
+              <PayloadValue field={field} />
             </div>
           ))}
-          {row.campaignSpendLabel !== null && (
+          {row.campaignSpendMinor !== null && (
             <div className="contents">
               <dt className="text-muted-foreground">Campaign spend</dt>
-              <dd className="font-mono">{row.campaignSpendLabel}</dd>
+              <dd className="font-mono">{formatRupees(row.campaignSpendMinor)}</dd>
             </div>
           )}
           {row.offerId !== null && (
@@ -186,7 +207,7 @@ function EventRow({ row }: { row: EventStreamRow }) {
         <>
           <Separator className="my-2" />
           <p className="text-xs">
-            <span className="text-muted-foreground mr-1 uppercase tracking-wide text-[10px]">
+            <span className="text-muted-foreground mr-1 text-[10px] uppercase tracking-wide">
               Model explanation · non-authoritative
             </span>
             <br />

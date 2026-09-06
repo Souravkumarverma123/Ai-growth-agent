@@ -912,9 +912,12 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 **Implementation notes (2026-09-06).**
 - No frozen contract touched. Pure client of the existing `auditRouter` (TICKET-404); no new procedure, no output-schema change.
-- Split for testability: `apps/web/lib/event-stream.ts` holds all shaping (`toEventStreamRows`, payload flattening, reason-code tone); `MerchantEventStream` (polling container) is separated from the props-only `EventStreamView`.
+- Split for testability: `apps/web/lib/event-stream.ts` holds all shaping (`toEventStreamRows`, payload flattening, `isStreamSettled`); `MerchantEventStream` (polling container) is separated from the props-only `EventStreamView`. Money stays in minor units through the shaping layer — `EventRow` calls `formatRupees` at the JSX boundary (CONTRACTS §3), matching the buyer console.
+- `apps/web` now depends on `@repo/policy` (the pure, zero-dep contracts package). `reasonTone`'s map is keyed by the frozen `ReasonCode` enum so a renamed/added code is a compile error, not a silent grey badge; the terminal-state check reads the frozen `TERMINAL_STATES`. No runtime enum is bundled — `ReasonCode` is a type-only import.
+- Polling stops once the last event is terminal (`isStreamSettled`) — a finished negotiation is not an "active session".
 - First component-test runner in `apps/web` (`vitest` + `jsdom` + `@testing-library/react`). TICKET-506 had read CONTRACTS §8 as barring this — see **ISSUE-018** for why a props-only jsdom render is not one of §8's three backend seams.
 - Watch-only by construction: the screen has no control. The merchant's only lever mid-negotiation stays the kill switch on the policy page (RA-1).
+- Two-axis `/code-review` (standards + spec) run against `main` before merge; the money-boundary, enum-drift and infinite-poll findings above are the fixes it produced. The route is reachable by URL only (no session-list nav) — noted, out of this ticket's scope.
 
 **References.** PRD §13; Settled by: Q13
 
