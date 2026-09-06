@@ -158,6 +158,36 @@ describe("extractCandidateCounts", () => {
   it("returns null when the session never reached candidate generation", () => {
     expect(extractCandidateCounts(WORKED_EXAMPLE.slice(0, 2))).toBeNull();
   });
+
+  it("uses the newest CANDIDATES_EVALUATED event, not the first, and counts the rounds", () => {
+    const multiRound = [
+      ledgerEvent({
+        sequence: 2,
+        reasonCode: "CANDIDATES_EVALUATED",
+        payload: { evaluated: 12, feasible: 9, tier1: 4 },
+      }),
+      ledgerEvent({
+        sequence: 6,
+        reasonCode: "CANDIDATES_EVALUATED",
+        payload: { evaluated: 8, feasible: 3, tier1: 1 },
+      }),
+    ];
+    const counts = extractCandidateCounts(multiRound)!;
+    expect(counts.roundsEvaluated).toBe(2);
+    expect(counts.counts.map((c) => c.value)).toEqual([8, 3, 1]);
+  });
+
+  it("rejects a fractional or negative count rather than displaying an impossible figure", () => {
+    const counts = extractCandidateCounts([
+      ledgerEvent({
+        sequence: 2,
+        reasonCode: "CANDIDATES_EVALUATED",
+        payload: { evaluated: -3, feasible: 2.5, tier1: 4 },
+      }),
+    ])!;
+    expect(counts.counts.map((c) => c.value)).toEqual([null, null, 4]);
+    expect(counts.completeness).toBe("partial");
+  });
 });
 
 describe("summarizeChain", () => {
@@ -221,6 +251,25 @@ describe("AuditTrailView", () => {
     expect(within(indicator).getByText("Chain verified")).toBeInTheDocument();
     expect(within(indicator).getByText(/self-anchored/i)).toBeInTheDocument();
     expect(within(indicator).getByText(/PRD §13\.3/)).toBeInTheDocument();
+  });
+
+  it("says so when chain verification itself could not be reached", () => {
+    render(
+      <AuditTrailView
+        rows={toAuditTrailRows(WORKED_EXAMPLE)}
+        chain={null}
+        chainError="503 upstream"
+        candidateCounts={extractCandidateCounts(WORKED_EXAMPLE)}
+      />,
+    );
+    const indicator = screen.getByTestId("chain-verification");
+    expect(indicator.getAttribute("data-status")).toBe("unavailable");
+    expect(within(indicator).getByText("Chain not verified")).toBeInTheDocument();
+    expect(within(indicator).getByText(/503 upstream/)).toBeInTheDocument();
+    // The events are still shown — just without a confirmed chain result.
+    expect(document.querySelectorAll("li[data-reason-code]")).toHaveLength(
+      REASON_CODES_IN_ORDER.length,
+    );
   });
 
   it("shows a broken chain loudly", () => {

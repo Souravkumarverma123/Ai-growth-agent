@@ -177,16 +177,27 @@ change to frozen router signatures (CONTRACTS.md §1/§11.2) and needs lead
 sign-off on the auth mechanism. The buyer-facing surface has the same shape
 and should be reviewed in the same pass.
 
+The **audit** router (`packages/trpc/server/routes/audit/route.ts` —
+`getSessionLedger`, `verifyChain`) has the same shape: `publicProcedure`
+keyed only by `sessionId`, no auth. TICKET-502's live event stream and
+TICKET-505's audit trail both consume it, so a guessed `sessionId` exposes a
+session's full ledger — reason codes, model explanations, offer ids, campaign
+spend. Same frozen-signature auth pass, same deferral.
+
 Acceptable for the MVP demo as-is (single seed merchant, no real merchant
 data), but must not ship to real merchants without this.
 
 ### Related Ticket
 
-TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern)
+TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern),
+TICKET-502 / TICKET-505 (audit router, same shape — CodeAnt flagged on PR #45)
 
 ### Status History
 
 - 2026-09-06: OPEN — recorded from a CodeAnt review comment on PR #44.
+- 2026-09-06: still OPEN — CodeAnt flagged the same class on PR #45's audit
+  route; folded the audit router into this issue rather than opening a
+  duplicate.
 
 ---
 

@@ -75,12 +75,18 @@ export function MerchantAuditTrail({ sessionId }: { sessionId: string }) {
   const events = ledger.data?.events;
   const settled = useMemo(() => !!events && events.length > 0 && isStreamSettled(events), [events]);
 
-  // Chain verification runs off the same append-only ledger, so it settles
-  // when the ledger does — no point re-verifying a finished chain forever.
+  // Chain verification runs off the same append-only ledger. Stop polling it
+  // only once the ledger is settled AND the last verification actually
+  // covered every event now on screen — otherwise a chain result from the
+  // poll just before the final events landed would be frozen stale next to a
+  // longer trail.
   const chainQuery = trpc.audit.verifyChain.useQuery(
     { sessionId },
     {
-      refetchInterval: settled ? false : MERCHANT_POLL_INTERVAL_MS,
+      refetchInterval: (q) => {
+        const covered = q.state.data?.eventCount === events?.length;
+        return settled && covered ? false : MERCHANT_POLL_INTERVAL_MS;
+      },
       refetchIntervalInBackground: false,
       staleTime: 0,
     },
@@ -100,6 +106,7 @@ export function MerchantAuditTrail({ sessionId }: { sessionId: string }) {
     <AuditTrailView
       rows={rows}
       chain={chain}
+      chainError={chainQuery.isError ? (chainQuery.error?.message ?? "unknown error") : null}
       candidateCounts={candidateCounts}
       isLoading={ledger.isLoading}
       isError={ledger.isError}
@@ -119,6 +126,7 @@ export function MerchantAuditTrail({ sessionId }: { sessionId: string }) {
 export function AuditTrailView({
   rows,
   chain,
+  chainError = null,
   candidateCounts,
   isLoading = false,
   isError = false,
@@ -129,6 +137,9 @@ export function AuditTrailView({
 }: {
   rows: EventStreamRow[];
   chain: ChainSummary | null;
+  /** Set when `verifyChain` itself failed — so the trail never renders
+   *  without saying whether the chain is intact. */
+  chainError?: string | null;
   candidateCounts: CandidateCounts | null;
   isLoading?: boolean;
   isError?: boolean;
@@ -164,7 +175,11 @@ export function AuditTrailView({
         </p>
       ) : (
         <div className="flex flex-col gap-5">
-          {chain && <ChainVerificationIndicator summary={chain} />}
+          {chain ? (
+            <ChainVerificationIndicator summary={chain} />
+          ) : chainError ? (
+            <ChainVerificationUnavailable message={chainError} />
+          ) : null}
           <CandidateCountsPanel counts={candidateCounts} />
           <ol className="flex flex-col gap-3">
             {rows.map((row) => (
@@ -208,6 +223,25 @@ function ChainVerificationIndicator({ summary }: { summary: ChainSummary }) {
   );
 }
 
+function ChainVerificationUnavailable({ message }: { message: string }) {
+  return (
+    <div
+      data-testid="chain-verification"
+      data-status="unavailable"
+      className={cn("flex items-start gap-3 rounded-md border p-3", CHAIN_TONE_CLASS.broken)}
+    >
+      <ShieldAlert className="mt-0.5 size-5 shrink-0" />
+      <div className="min-w-0">
+        <p className="text-sm font-semibold">Chain not verified</p>
+        <p className="mt-1 text-xs opacity-80">
+          The chain-verification check could not be reached ({message}). The events below are shown
+          without a confirmed hash-chain result — refresh to retry.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function CandidateCountsPanel({ counts }: { counts: CandidateCounts | null }) {
   const missing =
     counts?.completeness === "partial"
@@ -231,6 +265,12 @@ function CandidateCountsPanel({ counts }: { counts: CandidateCounts | null }) {
               </div>
             ))}
           </dl>
+          {counts.roundsEvaluated > 1 && (
+            <p className="text-muted-foreground mt-2 text-[11px]">
+              Newest of {counts.roundsEvaluated} candidate evaluations this session — one per
+              negotiation round.
+            </p>
+          )}
           {missing.length > 0 && (
             <p className="text-muted-foreground mt-2 text-[11px]">
               {missing.join(" and ")} not recorded in this session&apos;s{" "}

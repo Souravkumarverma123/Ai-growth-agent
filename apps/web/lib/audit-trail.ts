@@ -119,6 +119,13 @@ export type CandidateCounts = {
    * `selfFundingCount` but not an explicit feasible count — see ISSUE-021).
    */
   completeness: "full" | "partial";
+  /**
+   * How many `CANDIDATES_EVALUATED` events this session has written. The
+   * generator runs once per round (PRD §8), so a multi-round negotiation has
+   * several — the panel shows the newest and names this count so an old
+   * search space is never mistaken for the current one.
+   */
+  roundsEvaluated: number;
 };
 
 const CANDIDATE_COUNT_LABEL: Record<CandidateCountKey, string> = {
@@ -141,34 +148,47 @@ const CANDIDATE_COUNT_ALIASES: Record<CandidateCountKey, readonly string[]> = {
   tier1: ["tier1", "tier1Count", "selfFundingCount"],
 };
 
+/**
+ * A candidate count is a count of baskets — a non-negative integer, ≤ 12
+ * (PRD §8's hard cap). A fractional or negative value means the payload is
+ * malformed; treat it as "not recorded" rather than display an impossible
+ * figure as evidence.
+ */
 function readCount(payload: Record<string, unknown>, aliases: readonly string[]): number | null {
   for (const key of aliases) {
     const value = payload[key];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
   }
   return null;
 }
 
 /**
  * Pull the candidate counts out of the session's `CANDIDATES_EVALUATED`
- * event. Returns `null` when the session never got as far as generating
- * candidates. When the event exists but a count is missing, that count's
- * `value` is `null` and `completeness` is `"partial"`.
+ * events. The generator runs once per round (PRD §8), so a multi-round
+ * negotiation writes several — the **newest** is used, since it is the space
+ * the engine last searched. Returns `null` when the session never got as far
+ * as generating candidates. When the event exists but a count is missing,
+ * that count's `value` is `null` and `completeness` is `"partial"`.
  */
 export function extractCandidateCounts(
   events: readonly LedgerEvent[],
 ): CandidateCounts | null {
-  const evaluatedEvent = events.find((event) => event.reasonCode === "CANDIDATES_EVALUATED");
-  if (!evaluatedEvent) return null;
+  const evaluations = events
+    .filter((event) => event.reasonCode === "CANDIDATES_EVALUATED")
+    .sort((a, b) => a.sequence - b.sequence);
+
+  const latest = evaluations.at(-1);
+  if (!latest) return null;
 
   const counts = (Object.keys(CANDIDATE_COUNT_ALIASES) as CandidateCountKey[]).map((key) => ({
     key,
     label: CANDIDATE_COUNT_LABEL[key],
-    value: readCount(evaluatedEvent.payload, CANDIDATE_COUNT_ALIASES[key]),
+    value: readCount(latest.payload, CANDIDATE_COUNT_ALIASES[key]),
   }));
 
   return {
     counts,
     completeness: counts.every((count) => count.value !== null) ? "full" : "partial",
+    roundsEvaluated: evaluations.length,
   };
 }
