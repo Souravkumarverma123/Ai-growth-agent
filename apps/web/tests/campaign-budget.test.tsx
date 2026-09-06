@@ -115,12 +115,28 @@ describe("CampaignBudgetPanel", () => {
     expect(widthPct("available")).toBeCloseTo(94, 5);
   });
 
-  it("renders loading and error states without a breakdown", () => {
-    const { rerender } = render(<CampaignBudgetPanel view={null} isLoading />);
+  it("renders loading and error states when there is no snapshot yet", () => {
+    const { rerender } = render(<CampaignBudgetPanel view={null} />);
     expect(screen.getByText(/Loading campaign budget/)).toBeInTheDocument();
 
     rerender(<CampaignBudgetPanel view={null} isError errorMessage="boom" />);
     expect(screen.getByText(/Could not load the campaign budget: boom/)).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /available of/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps the last good figures on screen when a background refresh fails", () => {
+    render(
+      <CampaignBudgetPanel
+        view={toCampaignBudgetView(AFTER_TIER2_MINT)}
+        isError
+        errorMessage="network down"
+      />,
+    );
+
+    // The figures are still shown, not replaced by a full error panel.
+    expect(figure("available")).toBe("₹47,000.00");
+    expect(figure("reserved")).toBe("₹3,000.00");
+    // …with the refresh failure surfaced inline.
+    expect(screen.getByText(/Last refresh failed: network down/)).toBeInTheDocument();
   });
 });

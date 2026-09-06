@@ -8,7 +8,16 @@ export type CampaignBudgetBreakdown = {
   totalMinor: number;
   reservedMinor: number;
   committedMinor: number;
-  /** `total − reserved − committed` (PRD §6.5). */
+  /**
+   * `max(0, total − reserved − committed)` (PRD §6.5). Floored at zero: a
+   * merchant can approve a policy that lowers `campaignBudgetTotalMinor`
+   * below what is already reserved + committed, which would otherwise make
+   * this negative. "Available headroom" has no negative meaning — it is zero
+   * and the merchant is overcommitted — and the overcommitment stays fully
+   * visible because `total`, `reserved` and `committed` are all reported raw.
+   * (This also keeps the value inside `getCampaignBudget`'s frozen
+   * `nonnegative()` output schema.)
+   */
   availableMinor: number;
 };
 
@@ -32,7 +41,11 @@ export type CampaignBudgetBreakdown = {
  *
  * Read-only snapshot, no row lock: a display / feasibility read, never the
  * decision input. The safe-under-concurrency check still happens at mint time
- * inside `reserveCampaignBudget`.
+ * inside `reserveCampaignBudget`. The policy total and the hold sums are read
+ * in two statements, so a snapshot can briefly pair an old total with newer
+ * holds (or vice versa) — acceptable for a 2s-polled display, and its only
+ * harmful outcome (a negative `available` breaking the tRPC output schema) is
+ * removed by the zero-floor on `availableMinor` below.
  *
  * Returns `null` when the merchant has no policy row (mirrors
  * `getMerchantPolicy`).
@@ -70,7 +83,7 @@ export async function getCampaignBudgetBreakdown(
     totalMinor,
     reservedMinor,
     committedMinor,
-    availableMinor: totalMinor - reservedMinor - committedMinor,
+    availableMinor: Math.max(0, totalMinor - reservedMinor - committedMinor),
   };
 }
 

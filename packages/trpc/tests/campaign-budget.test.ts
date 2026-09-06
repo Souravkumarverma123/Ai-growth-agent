@@ -305,6 +305,45 @@ describe("TICKET-503 — merchant.getCampaignBudget", () => {
     });
   });
 
+  it("floors availableMinor at zero when a budget cut leaves the merchant overcommitted (never a negative that breaks the output schema)", async () => {
+    const TOTAL = 1_000_000;
+    const SHORTFALL = 600_000;
+    const merchantId = await insertMerchantWithPolicy(TOTAL);
+    const db = await getTestDb();
+    const caller = serverRouter.createCaller({ db });
+
+    const { offerId, sessionId } = await insertSessionAndOffer({
+      merchantId,
+      index: 0,
+      shortfallMinor: SHORTFALL,
+    });
+    const reserve = await reserveCampaignBudget(db, {
+      merchantId,
+      offerId,
+      amountMinor: SHORTFALL,
+      expiresAt: new Date(Date.now() + 600_000),
+      ledger: reserveLedgerFor(sessionId),
+    });
+    if (!reserve.reserved) throw new Error("reservation unexpectedly failed");
+
+    // The merchant approves a policy that cuts the budget below what is
+    // already reserved (approvePolicy allows any nonnegative total).
+    await db
+      .update(merchantPoliciesTable)
+      .set({ campaignBudgetTotalMinor: 400_000 })
+      .where(eq(merchantPoliciesTable.merchantId, merchantId));
+
+    const budget = await caller.merchant.getCampaignBudget({ merchantId });
+    expect(budget).toEqual({
+      totalMinor: 400_000,
+      reservedMinor: SHORTFALL,
+      committedMinor: 0,
+      availableMinor: 0,
+    });
+    // The overcommitment is still visible: reserved > total.
+    expect(budget.reservedMinor).toBeGreaterThan(budget.totalMinor);
+  });
+
   it("fails with NOT_FOUND for a merchant that has no policy row", async () => {
     const db = await getTestDb();
     const caller = serverRouter.createCaller({ db });

@@ -947,6 +947,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 - The countdown lives at its own route (`/merchant/budget`) using the same hardcoded demo merchant id as the TICKET-501 policy console — a fixed well-known id, no new `apps/web` → `@repo/database` import.
 - `notImplemented` helper removed from the merchant router — nothing used it after this.
 - **ISSUE-019** raised: the poll-card chrome (`RefreshCw` status line, error `<p>`, "Last checked" footer, `POLL_INTERVAL_MS`) is now copied between `merchant-event-stream.tsx` and `campaign-budget-countdown.tsx`. LOW — TICKET-504/505 should extract a shared `<PollCard>` before adding a third copy.
+- **CodeAnt review of PR #44** (2026-09-06): `availableMinor` is now `max(0, total − reserved − committed)` — a budget-lowering policy approval could otherwise make it negative and break the frozen `nonnegative()` output schema; the overcommitment stays visible via raw `total`/`reserved`/`committed`. The countdown card keeps the last good figures on screen when a background poll fails (surfacing the failure inline) instead of blanking to an error. **ISSUE-020** raised for the systemic `publicProcedure` + `merchantId`-as-input authorization gap across the whole merchant router (not a TICKET-503 defect — needs a lead-approved auth story).
 
 **References.** PRD §6.5; Settled by: Q10, Q22
 

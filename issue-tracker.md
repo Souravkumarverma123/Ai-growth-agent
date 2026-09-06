@@ -69,6 +69,57 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-020 — the whole merchant tRPC surface is `publicProcedure` with `merchantId` as an input — any caller can read/write any merchant
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-503 (CodeAnt review of PR #44 flagged `getCampaignBudget`)
+Date: 2026-09-06
+Violates invariant: none listed in PRD §21 — but it is a real
+authorization gap on the merchant console surface.
+
+### Problem
+
+Every procedure in `packages/trpc/server/routes/merchant/route.ts`
+(`getPolicy`, `approvePolicy`, `setNegotiationEnabled`, and now
+`getCampaignBudget`) is a `publicProcedure` that takes `merchantId` as a
+plain input field. There is no authentication or authorization anywhere in
+the stack — `Context` is just `{ db }`, and `apps/web` hardcodes the single
+seed merchant id. So any unauthenticated caller who knows (or guesses) a
+merchant UUID can read that merchant's policy, floors, per-deal cap and full
+campaign-budget breakdown, and can approve policy changes or flip their kill
+switch.
+
+CodeAnt flagged this specifically on `getCampaignBudget` (PR #44), but it is
+not a TICKET-503 defect — `getCampaignBudget` follows the exact pattern the
+other three merchant procedures established in TICKET-501, and the frozen
+Phase-0 signature (TICKET-006) already fixed `{ merchantId: z.string() }` as
+its input. Fixing it for one procedure would be inconsistent and wouldn't
+close the hole.
+
+### Fix
+
+Out of scope for TICKET-503 and not a unilateral change: it needs an
+auth story (a `protectedProcedure` with a real session / API key in
+`Context`, and `merchantId` derived from the caller identity instead of
+taken as input) applied across the whole merchant router at once. That is a
+change to frozen router signatures (CONTRACTS.md §1/§11.2) and needs lead
+sign-off on the auth mechanism. The buyer-facing surface has the same shape
+and should be reviewed in the same pass.
+
+Acceptable for the MVP demo as-is (single seed merchant, no real merchant
+data), but must not ship to real merchants without this.
+
+### Related Ticket
+
+TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern)
+
+### Status History
+
+- 2026-09-06: OPEN — recorded from a CodeAnt review comment on PR #44.
+
+---
+
 ## ISSUE-019 — `apps/web` merchant "watch" screens are copying the same poll-card chrome per ticket
 
 Status: OPEN

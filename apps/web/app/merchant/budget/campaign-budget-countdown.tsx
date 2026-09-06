@@ -60,7 +60,6 @@ export function MerchantCampaignBudget({ merchantId }: { merchantId: string }) {
   return (
     <CampaignBudgetPanel
       view={view}
-      isLoading={query.isLoading}
       isError={query.isError}
       errorMessage={query.error?.message ?? null}
       isFetching={query.isFetching}
@@ -76,14 +75,12 @@ export function MerchantCampaignBudget({ merchantId }: { merchantId: string }) {
  */
 export function CampaignBudgetPanel({
   view,
-  isLoading = false,
   isError = false,
   errorMessage = null,
   isFetching = false,
   lastUpdatedAt = 0,
 }: {
   view: CampaignBudgetView | null;
-  isLoading?: boolean;
   isError?: boolean;
   errorMessage?: string | null;
   isFetching?: boolean;
@@ -111,17 +108,27 @@ export function CampaignBudgetPanel({
         </div>
       </CardHeader>
       <CardContent>
-        {isError ? (
+        {view ? (
+          // A snapshot we already have always stays on screen — a transient
+          // failure on one 2s poll must not blank out the merchant's last
+          // good figures. The failure is surfaced inline instead.
+          <BudgetBreakdown view={view} />
+        ) : isError ? (
           <p className="text-destructive flex items-center gap-2 text-sm">
             <AlertCircle className="size-4" />
             Could not load the campaign budget{errorMessage ? `: ${errorMessage}` : "."}
           </p>
-        ) : isLoading || !view ? (
-          <p className="text-muted-foreground text-sm">Loading campaign budget…</p>
         ) : (
-          <BudgetBreakdown view={view} />
+          <p className="text-muted-foreground text-sm">Loading campaign budget…</p>
         )}
-        {!isError && lastUpdatedAt > 0 && (
+        {view && isError && (
+          <p className="text-destructive mt-4 flex items-center gap-2 text-[11px]">
+            <AlertCircle className="size-3" />
+            Last refresh failed{errorMessage ? `: ${errorMessage}` : "."} Showing the last known
+            figures.
+          </p>
+        )}
+        {view && !isError && lastUpdatedAt > 0 && (
           <p className="text-muted-foreground mt-4 text-[11px]">
             Last checked {new Date(lastUpdatedAt).toLocaleTimeString()}
           </p>
