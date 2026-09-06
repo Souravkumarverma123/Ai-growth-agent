@@ -425,6 +425,12 @@ export const negotiationRouter = router({
         // shortfall the engine saw — so the merchant console's walk-away card
         // can show what a different cap would have closed without ever
         // hardcoding a figure. Nothing extra is written on the feasible path.
+        //
+        // `availableCampaignBudgetMinor` here is the SAME snapshot the tiering
+        // decision above was made against — deliberately, so the card reports
+        // the budget the engine actually saw when it walked away, not a fresher
+        // (and now inconsistent) re-read. It is an informational figure, never
+        // a control-path value.
         const walkAwayEconomics = tierResult.feasible
           ? {}
           : summarizeWalkAwayEconomics({

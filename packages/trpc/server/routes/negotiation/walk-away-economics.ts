@@ -25,9 +25,11 @@ export type WalkAwayEconomics = {
   /** `available = total − reserved − committed` for the campaign at that moment. */
   availableCampaignBudgetMinor: number;
   /**
-   * The smallest campaign top-up that would have made at least one rescue
-   * basket feasible this round — i.e. the lowest `-contributionDeltaMinor`
-   * among the dilutive candidates the engine generated.
+   * The smallest per-deal shortfall among the round's dilutive candidates —
+   * the lowest `-contributionDeltaMinor` the engine generated. This is a
+   * candidate's own required campaign spend, i.e. the lowest per-deal cap
+   * that would have let at least one rescue basket through (the campaign
+   * budget is a separate limit — `availableCampaignBudgetMinor`).
    *
    * `null` when the round produced no dilutive candidate at all, OR when the
    * buyer has not yet refused a Tier 1 offer (`tier1Refused` false): a Tier 2

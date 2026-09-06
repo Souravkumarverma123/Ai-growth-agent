@@ -109,11 +109,12 @@ function resolveCapOutcome(walkAwayEvent: LedgerEvent): WalkAwayCapOutcome {
   const payload = walkAwayEvent.payload;
   const perDealCapMinor = readNonNegativeInt(payload.perDealCapMinor);
   const availableCampaignBudgetMinor = readNonNegativeInt(payload.availableCampaignBudgetMinor);
-  // `requiredCampaignSpendMinor` — the exact shortfall of a rejected mint
-  // (the MINT_ATTEMPTED path). `smallestRescueShortfallMinor` — the lowest
-  // shortfall the engine saw when a whole round produced no feasible basket
-  // (`null` before a Tier 1 refusal — a locked Tier 2 candidate no cap change
-  // could have reached). Either is "the top-up that would have closed a basket."
+  // `requiredCampaignSpendMinor` — the exact per-deal shortfall of a rejected
+  // mint (the MINT_ATTEMPTED path). `smallestRescueShortfallMinor` — the
+  // lowest per-deal shortfall the engine saw when a whole round produced no
+  // feasible basket (`null` before a Tier 1 refusal — a locked Tier 2
+  // candidate no cap change could have reached). Either is the lowest per-deal
+  // cap that would have let a rescue basket through.
   const shortfallMinor =
     readNonNegativeInt(payload.requiredCampaignSpendMinor) ??
     readNonNegativeInt(payload.smallestRescueShortfallMinor);
