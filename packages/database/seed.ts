@@ -4,6 +4,7 @@ import type { Basket, CommitmentType } from "@repo/policy/contracts";
 import { CURRENCY } from "@repo/policy/contracts";
 
 import { and, eq, notInArray } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import { db } from "./index";
 import {
@@ -335,7 +336,7 @@ export const REFERENCE_CART: Basket = {
 // touches a row this script didn't write.
 // ---------------------------------------------------------------------------
 
-export async function seedDatabase(database: typeof db = db): Promise<void> {
+export async function seedDatabase(database: NodePgDatabase = db): Promise<void> {
   await database.transaction(async (tx) => {
     await tx
       .insert(merchantsTable)

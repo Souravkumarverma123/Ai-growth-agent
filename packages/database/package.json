@@ -5,6 +5,7 @@
     "db:migrate": "dotenv -- drizzle-kit migrate",
     "db:generate": "dotenv -- drizzle-kit generate",
     "db:seed": "dotenv -- tsx seed.ts",
+    "db:seed-session": "dotenv -- tsx seed-session.ts",
     "dev": "dotenv -- drizzle-kit studio",
     "lint": "eslint .",
     "check-types": "tsc --noEmit",
