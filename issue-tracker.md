@@ -69,6 +69,93 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-017 — PRD §18.2's Tier 2 worked example is not reproducible by `generateCandidates` under the seeded ₹200 per-deal cap
+
+Status: NEEDS_SPEC_DECISION
+Severity: MEDIUM
+Found in: TICKET-206
+Date: 2026-09-06
+Violates invariant: none — the engine fails closed (a Tier 2 candidate that
+would breach the per-deal cap is marked infeasible, never offered).
+
+### Problem
+
+PRD §18.2's worked example has round 2 land on "original cart at ₹2,300 …
+shortfall ₹200 — exactly at the per-deal cap." No fixture can make
+`generateCandidates` produce that offer. It emits exactly one
+`PRICE_CONCESSION` candidate per round, at the *full* concession-curve
+fraction of the cart's floor-derived headroom (`round-envelope.ts`). On the
+§18.2 cart (Serum + Cleanser, ₹950 headroom) that is:
+
+| Round | curve | discount | shortfall | vs ₹200 cap |
+| --- | --- | --- | --- | --- |
+| 1 | 0.4 | ₹380 | ₹380 | infeasible |
+| 2 | 0.7 | ₹665 | ₹665 | infeasible |
+| 3 | 1.0 | ₹950 | ₹950 | infeasible |
+
+So with `perDealCapMinor = 20_000` (₹200, what `packages/database/seed.ts`
+seeds and what §5 / §18.2 state) **every** Tier 2 candidate on this cart is
+infeasible at every round — a Tier 2 offer is not generable end to end, on
+this cart, ever. The concession curve and the per-deal cap are mutually
+inconsistent for a cart this size: the curve's smallest step (0.4 × headroom)
+already exceeds the cap.
+
+### Expected
+
+Either the round-2 Tier 2 offer of §18.2 is generable (shortfall ≈ cap), or
+PRD §18.2 is corrected to numbers the frozen engine can actually produce.
+
+### Actual
+
+Neither. §18.2 is stated as "all tests and demo data use these numbers" but
+no test drives that Tier 2 offer, and none can.
+
+### Root Cause
+
+`generateCandidates` has no cap-aware `PRICE_CONCESSION` — it never proposes
+a *partial* discount sized to land just inside the per-deal cap. The
+concession curve is a fixed fraction of headroom (RA-4, frozen), and the
+per-deal cap is a separate downstream feasibility gate; nothing sizes the
+concession to the cap.
+
+### Impact
+
+Demo-path only. PRD §18.2's headline "the agent refusing a deal it could
+afford because a different limit binds" is real in principle but cannot be
+shown with §18.2's own cart + cap through the real generator.
+
+### Fix
+
+Needs a spec decision: (a) change §18.2's cart/cap so 0.4 × headroom ≤ cap,
+(b) change the concession curve, or (c) add a cap-aware partial
+`PRICE_CONCESSION` move to `generateCandidates` (a frozen-generator change,
+CONTRACTS.md §1). Not decided here.
+
+### Regression Test
+
+None yet — blocked on the spec decision.
+
+### Related Ticket
+
+TICKET-206 (worked around, not blocked — see below), overlaps ISSUE-012
+sub-issue 12e.
+
+### Status History
+
+- 2026-09-06: NEEDS_SPEC_DECISION
+
+**TICKET-206 workaround (not a fix).** The buyer agent harness
+(`packages/agent/demo/`) does drive a real Tier 2 offer end to end — buyer
+agent ↔ `runNegotiationRound` ↔ `mintOffer` against the pure engine — by
+using a demo fixture whose `perDealCapMinor` is widened to ₹700
+(`reference-scenario.ts`, documented inline). That makes rounds 1–2 Tier 2
+feasible and round 3 infeasible, reproducing §18.2's *shape* ("feasible,
+feasible, then the cap binds and it walks") without §18.2's exact figures.
+The DB-backed `propose` HTTP path still has no Tier-2-reaching fixture
+(ISSUE-012 sub-issue 12e stays open for it).
+
+---
+
 ## ISSUE-016 — `pnpm check-types` does not type-check the test suites in `packages/policy` and `packages/trpc`
 
 Status: OPEN
@@ -515,6 +602,16 @@ caught by the current suite. Worth a follow-up ticket building a genuine
 Tier-2-reaching fixture (likely needs `generateCandidates`'s `QUANTITY_VALUE`
 move type investigated for how to suppress or exhaust it) once TICKET-206 or
 TICKET-604 (invariant suite: payment and rail authority) need one anyway.
+
+**Update 2026-09-06 (TICKET-206):** partially addressed for the *pure-engine*
+path. The buyer agent harness (`packages/agent/demo/`) drives a real Tier 2
+mint end to end — `DemoMerchantModel` offers the lowest-total exposed
+candidate rather than the highest-contribution one, so once a Tier 1 refusal
+unlocks Tier 2 the merchant actually picks it. This needed a demo fixture
+with `perDealCapMinor` widened to ₹700 (ISSUE-017 records why ₹200 makes
+Tier 2 categorically infeasible on the reference cart). The DB-backed
+`propose` path is unchanged and still has no Tier-2-reaching fixture — this
+sub-issue stays OPEN for it.
 
 ---
 
