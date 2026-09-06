@@ -86,9 +86,15 @@ function loadRazorpayCheckout(): Promise<RazorpayConstructor> {
   razorpayLoad ??= new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    // Clear the memo on every failure path so a later attempt re-loads the
+    // script instead of re-awaiting a permanently-rejected promise.
     script.onload = () => {
-      if (w.Razorpay) resolve(w.Razorpay);
-      else reject(new Error("Razorpay checkout loaded but did not register"));
+      if (w.Razorpay) {
+        resolve(w.Razorpay);
+      } else {
+        razorpayLoad = undefined;
+        reject(new Error("Razorpay checkout loaded but did not register"));
+      }
     };
     script.onerror = () => {
       razorpayLoad = undefined;
@@ -133,6 +139,10 @@ export function BuyerNegotiationConsole({ sessionId }: { sessionId: string }) {
   const [currentOffer, setCurrentOffer] = useState<PublicOffer | null>(null);
   const [paymentHandle, setPaymentHandle] = useState<PaymentHandle | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
+  // Set when a fresh page load hits a session that is already past OPEN (a
+  // pending offer, awaiting payment, …). This screen keeps no server-side
+  // transcript or offer, so such a session cannot be resumed here.
+  const [stalledState, setStalledState] = useState<string | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
   const authorizedRef = useRef(false);
 
@@ -175,11 +185,15 @@ export function BuyerNegotiationConsole({ sessionId }: { sessionId: string }) {
       }
     } catch (error) {
       const text = errorText(error, "Could not open the negotiation.");
-      // A reload mid-negotiation lands here (the session already left the
-      // pre-negotiation state). Let the human carry on proposing.
-      if (/already left the pre-negotiation state/.test(text)) {
+      // A reload mid-negotiation lands here — the server names the state it
+      // found. Only a still-OPEN session can carry on proposing; anything
+      // further along has a pending offer / payment this screen can't restore.
+      const foundState = /pre-negotiation state \(([A-Z_]+)\)/.exec(text)?.[1];
+      if (foundState === "OPEN") {
         setOpened(true);
         append({ role: "system", text: "Negotiation already open — continuing." });
+      } else if (foundState) {
+        setStalledState(foundState);
       } else {
         append({ role: "system", text });
       }
@@ -296,9 +310,16 @@ export function BuyerNegotiationConsole({ sessionId }: { sessionId: string }) {
         name: "Merchant Growth Agent",
         description: `Authorize payment for order ${paymentHandle.orderId}`,
         handler: () => {
+          // Razorpay's client callback only says the buyer finished the
+          // checkout step — it is not proof of a settled payment. The
+          // merchant confirms that out of band (rail reconciliation); this
+          // screen never persists or asserts settlement itself.
           authorizedRef.current = true;
-          append({ role: "system", text: "Payment authorized with Razorpay." });
-          toast.success("Payment authorized.");
+          append({
+            role: "system",
+            text: "Checkout submitted to Razorpay. The merchant will confirm the payment separately.",
+          });
+          toast.success("Checkout submitted.");
         },
         modal: {
           ondismiss: () => {
@@ -439,8 +460,27 @@ export function BuyerNegotiationConsole({ sessionId }: { sessionId: string }) {
         </Card>
       )}
 
-      {/* Message composer — open the negotiation, then state your case. */}
-      {(phase === "unopened" || phase === "negotiating") && context && (
+      {/* A mid-negotiation session reached by a fresh page load — not resumable here. */}
+      {stalledState && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Negotiation already in progress</CardTitle>
+            <CardDescription>
+              This negotiation is past the opening stage (
+              <span className="font-mono">{stalledState}</span>) and can&apos;t be resumed from a
+              fresh page load. Continue from the agent that opened it.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {/* Message composer — open the negotiation, then state your case. Only
+          shown while there's something to do: an unflagged checkout has
+          nothing to open (the cart card says so), and a stalled session
+          can't be driven from here. */}
+      {!stalledState &&
+        context &&
+        (phase === "negotiating" || (phase === "unopened" && context.negotiationAvailable)) && (
         <Card>
           <CardContent className="flex flex-col gap-3">
             {phase === "unopened" ? (
