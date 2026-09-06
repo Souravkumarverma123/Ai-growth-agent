@@ -1,7 +1,7 @@
 # NEXT — Ticket Solve Order
 
 The live, ordered queue of what's left. Generated from `Tickets.md`'s
-statuses/dependencies on 2026-09-06 (re-derived after TICKET-506 closed) —
+statuses/dependencies on 2026-09-06 (re-derived after TICKET-502 closed) —
 **re-derive this whenever a ticket flips to `DONE` or a new one is added**,
 don't hand-edit around a stale ordering. Full acceptance criteria live in
 `Tickets.md`; this file only answers "what's next and why."
@@ -11,15 +11,14 @@ P2), with the payment control-path and invariant suites ahead of `apps/web`
 UI polish — per `Tickets.md`'s own stated philosophy ("depth of the core
 invariant beats feature count").
 
-41 of 46 tickets are `DONE`. 5 remain.
+42 of 46 tickets are `DONE`. 4 remain.
 
 ## Solve in this order
 
-1. **[TICKET-502](Tickets.md#ticket-502--live-negotiation-event-stream)** — Live negotiation event stream · P1 · ready now
-2. **[TICKET-503](Tickets.md#ticket-503--campaign-budget-countdown)** — Campaign budget countdown · P1 · ready now
-3. **[TICKET-505](Tickets.md#ticket-505--audit-trail-display)** — Audit trail display · P1 · ready now
-4. **[TICKET-504](Tickets.md#ticket-504--offer-status-and-ttl-display)** — Offer status and TTL display · P2 · ready now · drop first if time runs out
-5. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
+1. **[TICKET-503](Tickets.md#ticket-503--campaign-budget-countdown)** — Campaign budget countdown · P1 · ready now
+2. **[TICKET-505](Tickets.md#ticket-505--audit-trail-display)** — Audit trail display · P1 · ready now
+3. **[TICKET-504](Tickets.md#ticket-504--offer-status-and-ttl-display)** — Offer status and TTL display · P2 · ready now · drop first if time runs out
+4. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
 
 Every remaining ticket is `apps/web` UI work (TICKET-508 also touches
 `packages/trpc`).
@@ -27,8 +26,15 @@ Every remaining ticket is `apps/web` UI work (TICKET-508 also touches
 ## Parallelizable right now
 
 Everything remaining has all its dependencies satisfied *today* — a good set
-to hand to separate worktree-isolated agents simultaneously: `502`, `503`,
-`505`, `504`, `508`.
+to hand to separate worktree-isolated agents simultaneously: `503`, `505`,
+`504`, `508`.
+
+`apps/web` now has a `vitest` + `jsdom` component-test runner (added by
+TICKET-502; see ISSUE-018). TICKET-503/504/505 can use it for their required
+"display matches engine state" / "renders the full run" component tests
+instead of routing through `packages/trpc` — split shaping logic into
+`apps/web/lib/` and keep the fetching container thin, the way
+`event-stream.ts` / `MerchantEventStream` are.
 
 ## Known blockers worth knowing about before you start
 
@@ -54,8 +60,8 @@ to hand to separate worktree-isolated agents simultaneously: `502`, `503`,
   already has one needs to double-check `vitest.config.ts` has
   `fileParallelism: false`. Already set for `packages/database`,
   `packages/trpc`, and `packages/payments` — check before adding one to any
-  *other* package. (TICKET-206 added no Postgres-backed tests — its harness
-  is pure.)
+  *other* package. (`apps/web`'s new runner is jsdom-only, no Postgres, so it
+  is unaffected.)
 - **ISSUE-015** (`issue-tracker.md`, found in TICKET-601): the
   `BUYER_ENDS_SESSION → DECLINED` path has no `HOLD_RELEASED` transition in
   the frozen state machine, so a Tier 2 hold outstanding there self-heals
@@ -64,9 +70,13 @@ to hand to separate worktree-isolated agents simultaneously: `502`, `503`,
 - **ISSUE-016** (`issue-tracker.md`, found in TICKET-601): `packages/policy`
   and `packages/trpc` omit `tests/` from their tsconfig `include`, so
   `pnpm check-types` never type-checks their test suites. A proper fix is
-  still its own ticket. (`packages/agent` does not have this gap — its
-  tsconfig has no restrictive `include`, so TICKET-206's test suites are
-  type-checked.)
+  still its own ticket. (`packages/agent` and `apps/web` do not have this
+  gap — `apps/web`'s tsconfig `include` is `**/*.tsx`, so TICKET-502's test
+  is type-checked.)
+- **ISSUE-018** (`issue-tracker.md`, found in TICKET-502): `apps/web` gained
+  its first component-test runner. Recorded because TICKET-506 had read
+  CONTRACTS §8 as barring one; the entry explains why a props-only jsdom
+  render is not one of §8's three backend seams.
 - **ISSUE-011 / ISSUE-012 sub-issue 12a, 12d**: both marked
   `NEEDS_SPEC_DECISION` — a money-formatting boundary, and stale-policy-
   version reads mid-negotiation. Flag them rather than silently deciding
