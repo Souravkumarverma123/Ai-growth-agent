@@ -69,6 +69,112 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-016 — `pnpm check-types` does not type-check the test suites in `packages/policy` and `packages/trpc`
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-601 (economics invariant suite)
+Date: 2026-09-06
+Violates invariant: none — a CI-coverage gap.
+
+### Problem
+
+`packages/policy/tsconfig.json` and `packages/trpc/tsconfig.json` both set an
+explicit `include` list (`contracts/`, `economics/`, … / `server/`,
+`client/`) that omits `tests/`. Their `check-types` script is `tsc --noEmit`,
+so **test files in those two packages are never type-checked** — by anything.
+Vitest transpiles with esbuild (no type checking), and eslint's type-aware
+rules do not catch a plain "object literal is missing required properties"
+assignability error.
+
+`packages/payments`, `packages/database` and `packages/agent` have no
+`include` override, so their default `tsc` run *does* cover `tests/`.
+
+Concretely, while writing TICKET-601's `invariants-economics.test.ts` a call
+passed `{ ...offer, candidateId, sessionId, roundIndex }` — an `Offer`, not a
+`Candidate` — to `assertNoFloorBreach(candidate: Candidate, …)`. It compiled
+and the test passed (the function only reads `.basket`/`.candidateId` at
+runtime); `tsc` flags it as `error TS2345` only when the file is checked
+directly. Existing comments like candidate-generation.test.ts's "Checked by
+`pnpm check-types`, not at runtime" are therefore currently inaccurate for
+this package.
+
+### Fix
+
+Add `"tests/"` to the `include` array in both tsconfigs (or drop the
+`include` override and rely on the default like the other three packages).
+Expect this to surface latent type errors in the existing policy/trpc test
+files that must be fixed in the same change — which is why it is not being
+folded into TICKET-601. The TICKET-601 suite itself was hand-checked with a
+direct `tsc` run and is clean.
+
+### Status history
+
+- 2026-09-06: OPEN — found when a type-unsound call in the new invariant
+  suite compiled cleanly under `pnpm check-types`.
+
+---
+
+## ISSUE-015 — No `HOLD_RELEASED` ledger event on the `BUYER_ENDS_SESSION -> DECLINED` path when a Tier 2 hold is outstanding
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-601 (economics invariant suite)
+Date: 2026-09-06
+Violates invariant: arguably 8 (campaign budget reservations "have a
+lifecycle") — but only the *ledger-visible* half; the reservation itself
+still returns to available budget on TTL expiry.
+
+### Problem
+
+A Tier 2 offer reserves a campaign hold while the session sits in
+`OFFER_PENDING` (`OFFER_PENDING --BUDGET_RESERVED--> OFFER_PENDING`,
+`HOLD_RESERVED`). The frozen state machine
+(`packages/policy/contracts/state-machine.ts`) models three `HOLD_RELEASED`
+transitions — from `OFFER_PENDING` (buyer declines the offer), `EXPIRED`
+(TTL), and `PAYMENT_FAILED`. It has **no** `HOLD_RELEASED` row for
+`DECLINED`, which is where `OFFER_PENDING --BUYER_ENDS_SESSION--> DECLINED`
+(`BUYER_DECLINED`) lands — the buyer abandoning the session outright, as
+opposed to declining the specific offer.
+
+So if a buyer ends the session while a Tier 2 offer (and its hold) is
+pending, the hold is neither released nor committed by any ledger event. It
+stays `RESERVED` until its TTL (= offer TTL, 600 s) elapses, at which point
+`reserveCampaignBudget`'s `state = 'RESERVED' AND expires_at > now()`
+predicate stops counting it and the budget silently returns to available
+(`packages/database/repositories/campaign-holds.ts`). The economic outcome
+is correct; what is missing is a ledger event making that release
+reconstructable, and for up to 10 minutes the abandoned hold still counts
+against `available` for other negotiations.
+
+The same shape applies to any future `OFFER_PENDING`-adjacent walk-away that
+carries a live hold — there is no `WALKED_AWAY --HOLD_RELEASED--> WALKED_AWAY`
+row either — but no such transition exists in the frozen table today, and no
+orchestration layer yet reserves-then-walks, so `DECLINED` is the only
+concretely reachable case.
+
+### Expected / Actual
+
+Not a test failure — TICKET-601's suite asserts the frozen table's current
+reading (three release paths) and passes. This entry records the gap between
+that reading and PRD §6.5's "Release | Offer expires, is declined, or
+payment fails" if "declined" is taken to include a buyer-terminal end.
+
+### Fix
+
+Deferred — likely `NEEDS_SPEC_DECISION`: closing it means adding a
+`DECLINED --HOLD_RELEASED--> DECLINED` self-loop to the **frozen** state
+machine (CONTRACTS.md §1 — lead approval required), then wiring the release
+into whatever handles `BUYER_ENDS_SESSION`. Until then the TTL self-heal
+(PRD §6.5: "holds expire and return") is the accepted safety net.
+
+### Status history
+
+- 2026-09-06: OPEN — found while writing the TICKET-601 invariant suite's
+  "hold lifecycle across all terminal paths" assertion.
+
+---
+
 ## ISSUE-014 — `packages/payments`' first real-Postgres test files raced against each other on the shared sibling test database (recurrence of ISSUE-007)
 
 Status: FIXED
