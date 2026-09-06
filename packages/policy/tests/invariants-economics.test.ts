@@ -195,9 +195,11 @@ type PipelineResult =
 const SESSION_ID = "abcdefab-abcd-4abc-8abc-abcdefabcdef";
 
 /** Adds the three identity fields tiering deliberately leaves off, so a
- *  selected `TieredCandidate` can be handed to `mintOffer`. */
-function toCandidate(tiered: TieredCandidate, index: number): Candidate {
-  return { ...tiered, candidateId: `cand-${index}`, sessionId: SESSION_ID, roundIndex: 1 };
+ *  `TieredCandidate` can be handed to `mintOffer`. `roundIndex` is threaded
+ *  from the scenario, not hardcoded, so a round-2/3 scenario actually carries
+ *  its round into the candidate set and the minted offer. */
+function toCandidate(tiered: TieredCandidate, index: number, roundIndex: number): Candidate {
+  return { ...tiered, candidateId: `cand-${index}`, sessionId: SESSION_ID, roundIndex };
 }
 
 function runPipeline(scenario: Scenario): PipelineResult {
@@ -232,13 +234,15 @@ function runPipeline(scenario: Scenario): PipelineResult {
   }
 
   const selected = selectCandidate(tiering.selectableCandidates);
-  const selectedIndex = tiering.selectableCandidates.indexOf(selected);
-  const selectedCandidate = toCandidate(selected, selectedIndex);
-  const candidatesInRound = tiering.selectableCandidates.map((c, i) => toCandidate(c, i));
+  // `mintOffer`'s contract (mint.ts) wants the WHOLE round set, not just the
+  // selectable subset — so a forged/locked/infeasible candidate id is rejected
+  // with the right shape rather than a bare "not found".
+  const candidatesInRound = tiering.candidates.map((c, i) => toCandidate(c, i, roundIndex));
+  const selectedCandidate = candidatesInRound[tiering.candidates.indexOf(selected)]!;
 
   const mint = mintOffer({
     sessionId: SESSION_ID,
-    roundIndex: 1,
+    roundIndex,
     policyVersion: policy.policyVersion,
     tier1Refused,
     candidatesInRound,
@@ -306,18 +310,20 @@ function randomScenario(rng: Rng): Scenario {
       unitPriceMinor: sku.listPriceMinor,
     })),
   };
+  const campaignBudgetTotalMinor = randomInt(rng, 0, 2_000_000);
   return {
     catalogue,
     policy: {
       ...standardPolicy,
       merchantId,
       perDealCapMinor: randomInt(rng, 5_000, 120_000),
-      campaignBudgetTotalMinor: randomInt(rng, 0, 2_000_000),
+      campaignBudgetTotalMinor,
     },
     originalBasket,
     roundIndex: randomInt(rng, 1, 3),
     tier1Refused: rng() > 0.5,
-    availableCampaignBudgetMinor: randomInt(rng, 0, 2_000_000),
+    // `available = total - reserved - committed` (PRD §6.5) — never above total.
+    availableCampaignBudgetMinor: randomInt(rng, 0, campaignBudgetTotalMinor),
   };
 }
 
@@ -373,7 +379,7 @@ describe("INVARIANT: no candidate or minted offer ever prices a line below its S
         // candidate's basket (mint.ts), so checking the candidate covers it.
         expect(() =>
           assertNoFloorBreach(
-            toCandidate(result.selected, 0),
+            toCandidate(result.selected, 0, scenario.roundIndex),
             scenario.catalogue,
             scenario.policy.merchantId,
           ),
@@ -425,6 +431,7 @@ describe("INVARIANT: a selectable/minted Tier 2 offer's campaign spend never exc
   it("holds across 200 randomized scenarios — every feasible Tier 2 candidate the tiering step produces", () => {
     const rng = createSeededRandom(0x601_0003);
     let feasibleTier2Seen = 0;
+    let rejectedTier2Seen = 0;
 
     for (let trial = 0; trial < 200; trial += 1) {
       const scenario = randomScenario(rng);
@@ -441,6 +448,19 @@ describe("INVARIANT: a selectable/minted Tier 2 offer's campaign spend never exc
             scenario.availableCampaignBudgetMinor,
           );
           expect(candidate.requiredCampaignSpendMinor).toBeGreaterThan(0);
+        }
+        // The contrapositive of invariants 2 & 3: a Tier 2 candidate whose
+        // spend WOULD exceed a cap is rejected, with the reason code that
+        // matches which limit it broke — per-deal cap checked first (PRD §6.4).
+        if (candidate.tier === 2 && !candidate.feasible) {
+          rejectedTier2Seen += 1;
+          const shortfall = candidate.requiredCampaignSpendMinor;
+          if (shortfall > scenario.policy.perDealCapMinor) {
+            expect(candidate.infeasibleReason).toBe("DILUTION_EXCEEDS_PER_DEAL_CAP");
+          } else {
+            expect(shortfall).toBeGreaterThan(scenario.availableCampaignBudgetMinor);
+            expect(candidate.infeasibleReason).toBe("CAMPAIGN_BUDGET_EXHAUSTED");
+          }
         }
         // A Tier 1 candidate never consumes campaign budget at all.
         if (candidate.tier === 1) {
@@ -475,9 +495,31 @@ describe("INVARIANT: a selectable/minted Tier 2 offer's campaign spend never exc
       }
     }
 
-    // The sweep must actually exercise feasible Tier 2 candidates, even if it
-    // rarely selects one.
+    // The sweep must actually exercise both a feasible Tier 2 candidate and a
+    // cap/budget-rejected one, even if it rarely selects either.
     expect(feasibleTier2Seen).toBeGreaterThan(0);
+    expect(rejectedTier2Seen).toBeGreaterThan(0);
+  });
+
+  it("a fully-infeasible pipeline (every Tier 2 over cap, no Tier 1) resolves to NO_FEASIBLE_BASKET", () => {
+    const tiering = assignTiersAndFeasibility({
+      candidates: [-25_000, -40_000].map((contributionDeltaMinor, i) => ({
+        moveType: "PRICE_CONCESSION" as const,
+        basket: {
+          currency: "INR" as const,
+          commitments: [],
+          lines: [{ skuId: SERUM_SKU_ID, quantity: 1, unitPriceMinor: 150_000 + i }],
+        },
+        totalMinor: 150_000 + i,
+        contributionMinor: 100_000 + contributionDeltaMinor,
+        contributionDeltaMinor,
+        clearsSlowMoving: false,
+      })),
+      tier1Refused: true,
+      perDealCapMinor: 20_000,
+      availableCampaignBudgetMinor: 5_000_000,
+    });
+    expect(tiering).toEqual({ feasible: false, reasonCode: "NO_FEASIBLE_BASKET" });
   });
 
   it("when a Tier 2 candidate IS selected (no Tier 1 in play) and minted, its spend equals the shortfall and clears both caps", () => {
@@ -511,14 +553,14 @@ describe("INVARIANT: a selectable/minted Tier 2 offer's campaign spend never exc
     expect(selected.requiredCampaignSpendMinor).toBeLessThanOrEqual(perDealCapMinor);
     expect(selected.requiredCampaignSpendMinor).toBeLessThanOrEqual(availableCampaignBudgetMinor);
 
-    const candidatesInRound = tiering.selectableCandidates.map((c, i) => toCandidate(c, i));
+    const candidatesInRound = tiering.candidates.map((c, i) => toCandidate(c, i, 1));
     const mint = mintOffer({
       sessionId: SESSION_ID,
       roundIndex: 1,
       policyVersion: 1,
       tier1Refused: true,
       candidatesInRound,
-      candidateId: candidatesInRound[tiering.selectableCandidates.indexOf(selected)]!.candidateId,
+      candidateId: candidatesInRound[tiering.candidates.indexOf(selected)]!.candidateId,
       campaignBudgetReservation: {
         reserved: true,
         offerId: "11111111-2222-4333-8444-555555555555",
@@ -614,11 +656,14 @@ describe("INVARIANT: a selectable/minted Tier 2 offer's campaign spend never exc
 });
 
 // ===========================================================================
-// Invariant 4 — holds are reserved, released and committed correctly across
-// all terminal paths (frozen state machine reading; PRD §6.5, §21.8)
+// Invariant 4 — holds are reserved, released and committed with exactly one
+// reason code each, and the frozen state machine's release paths match the
+// causes PRD §6.5 lists (frozen-table reading; PRD §6.5, §21.8). The one
+// terminal path that is NOT covered — BUYER_ENDS_SESSION -> DECLINED — is
+// pinned as an explicit known gap (ISSUE-015), not left implicit.
 // ===========================================================================
 
-describe("INVARIANT: the campaign-hold lifecycle is complete and single-coded across every terminal path (PRD §6.5)", () => {
+describe("INVARIANT: the campaign-hold lifecycle is single-coded, and its release paths match the frozen state machine (PRD §6.5)", () => {
   it("reserve resolves to exactly HOLD_RESERVED, and only for Tier 2", () => {
     const reserve = resolveBudgetReservedTransition(2);
     expect(reserve.reasonCode).toBe("HOLD_RESERVED");
@@ -646,17 +691,32 @@ describe("INVARIANT: the campaign-hold lifecycle is complete and single-coded ac
     expect(() => resolveHoldReleaseTransition("EXPIRED", 1)).toThrow(/tier 2/i);
   });
 
-  it("the frozen table's HOLD_RELEASED transitions cover exactly the states a live Tier 2 hold can be sitting in", () => {
+  it("the frozen table's HOLD_RELEASED transitions fire from OFFER_PENDING (decline), EXPIRED and PAYMENT_FAILED", () => {
     const releaseFroms = TRANSITIONS.filter((t) => t.reasonCode === "HOLD_RELEASED")
       .map((t) => t.from)
       .sort();
     // A hold is reserved in OFFER_PENDING and released when the offer is
     // declined (OFFER_PENDING -> OPEN), expires (EXPIRED) or the payment fails
-    // (PAYMENT_FAILED). Known gap — ISSUE-015: the OFFER_PENDING ->
-    // BUYER_ENDS_SESSION -> DECLINED path has no HOLD_RELEASED row, so a hold
-    // outstanding there self-heals only via TTL. This asserts today's frozen
-    // reading; if ISSUE-015 is resolved, "DECLINED" joins this list.
+    // (PAYMENT_FAILED). If ISSUE-015 is resolved, "DECLINED" joins this list.
     expect(releaseFroms).toEqual(["EXPIRED", "OFFER_PENDING", "PAYMENT_FAILED"]);
+  });
+
+  it("KNOWN GAP (ISSUE-015): DECLINED — the buyer-ends-session terminal state — has no hold-release transition", () => {
+    // A Tier 2 hold reserved in OFFER_PENDING can still be outstanding when the
+    // buyer ends the session outright (OFFER_PENDING -> BUYER_ENDS_SESSION ->
+    // DECLINED). The frozen state machine has no transition originating from
+    // DECLINED at all — so such a hold has no HOLD_RELEASED event and
+    // self-heals only via its TTL (issue-tracker.md ISSUE-015). This pins the
+    // gap as an explicit expectation rather than a buried comment: adding a
+    // `DECLINED --HOLD_RELEASED--> DECLINED` self-loop (the ISSUE-015 fix)
+    // makes this test fail and points the author here.
+    const buyerEndsSession = TRANSITIONS.find((t) => t.event === "BUYER_ENDS_SESSION");
+    expect(buyerEndsSession?.to).toBe("DECLINED");
+
+    // `as string` on purpose — the frozen table's inferred `from` union does
+    // not even include "DECLINED", which is exactly the gap being pinned.
+    const fromStates = TRANSITIONS.map((t) => t.from as string);
+    expect(fromStates).not.toContain("DECLINED");
   });
 
   it("HOLD_RESERVED / HOLD_RELEASED / HOLD_COMMITTED are each the only code on their transition, never merged with a session code", () => {

@@ -102,16 +102,31 @@ this package.
 ### Fix
 
 Add `"tests/"` to the `include` array in both tsconfigs (or drop the
-`include` override and rely on the default like the other three packages).
-Expect this to surface latent type errors in the existing policy/trpc test
-files that must be fixed in the same change — which is why it is not being
-folded into TICKET-601. The TICKET-601 suite itself was hand-checked with a
-direct `tsc` run and is clean.
+`include` override and rely on the default like the other three packages),
+then fix the latent errors it surfaces. Measured 2026-09-06 by adding
+`tests/` locally and running `check-types`:
+
+- **`packages/policy`** — 3 errors, all in `tests/contribution.test.ts`
+  (lines ~295/299/319): a `Partial<SkuPolicy>`-style override object passed
+  where a full `SkuPolicy` is required. Small and localized.
+- **`packages/trpc`** — 17 errors across `tests/audit-route.test.ts`,
+  `tests/merchant-policy-approval.test.ts`, `tests/negotiation-route.test.ts`:
+  mostly `NodePgDatabase<…>` not assignable to `NodePgDatabase<…> & { $client: Pool }`
+  (a drizzle client typing mismatch at the test-db seam), plus one
+  top-level-`await` needing the test `module`/`target` raised, and a
+  `readonly []` vs mutable `commitments` array. Needs its own pass.
+
+Kept out of the TICKET-601 PR and its CodeAnt follow-up: ~20 unrelated type
+fixes across two packages do not belong in a review of one new test file. The
+TICKET-601 suite itself is hand-checked with a direct `tsc --noEmit` run on
+the file and is clean.
 
 ### Status history
 
 - 2026-09-06: OPEN — found when a type-unsound call in the new invariant
   suite compiled cleanly under `pnpm check-types`.
+- 2026-09-06: measured the cascade (3 policy + 17 trpc errors, categorized
+  above) so the fix can be scoped as its own ticket.
 
 ---
 
@@ -172,6 +187,11 @@ into whatever handles `BUYER_ENDS_SESSION`. Until then the TTL self-heal
 
 - 2026-09-06: OPEN — found while writing the TICKET-601 invariant suite's
   "hold lifecycle across all terminal paths" assertion.
+- 2026-09-06: still OPEN — a CodeAnt review comment on PR #34 re-flagged the
+  same gap. Follow-up: `invariants-economics.test.ts` now pins it with an
+  explicit "KNOWN GAP (ISSUE-015)" test that fails if a
+  `DECLINED --HOLD_RELEASED--> DECLINED` row is ever added, and the suite's
+  invariant-4 wording no longer claims "every terminal path".
 
 ---
 
