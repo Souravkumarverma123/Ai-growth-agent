@@ -69,6 +69,45 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-019 — `apps/web` merchant "watch" screens are copying the same poll-card chrome per ticket
+
+Status: OPEN
+Severity: LOW
+Found in: TICKET-503 (campaign budget countdown)
+Date: 2026-09-06
+Violates invariant: none — a UI-duplication judgement call.
+
+### Problem
+
+`apps/web/app/merchant/sessions/[sessionId]/merchant-event-stream.tsx`
+(TICKET-502) and `apps/web/app/merchant/budget/campaign-budget-countdown.tsx`
+(TICKET-503) now carry near-identical copies of the same poll-card shell: the
+`POLL_INTERVAL_MS = 2_000` constant, the `CardHeader` with the `RefreshCw` +
+`aria-live` "Live / Refreshing" status line, the `isError` `<p>` with
+`AlertCircle`, and the "Last checked … `toLocaleTimeString()`" footer. Each
+ticket was told to mirror TICKET-502, so two copies is defensible — but
+TICKET-504 (offer status / TTL) and TICKET-505 (audit trail) are both more
+`apps/web` "watch" screens and will make it four.
+
+### Fix
+
+Not done here — extracting a shared `<PollCard>` (or a `useMerchantPoll`
+hook) is its own small refactor and pulling it out mid-TICKET-503 would grow
+this PR past its ticket. Whoever picks up TICKET-504 or TICKET-505 should
+extract the shell first and retrofit 502/503, rather than adding a third
+copy. The pure shaping split (`lib/event-stream.ts`, `lib/campaign-budget.ts`)
+is already shared-by-pattern and is not the duplication in question.
+
+### Related Ticket
+
+TICKET-502, TICKET-503, TICKET-504, TICKET-505
+
+### Status History
+
+- 2026-09-06: OPEN — recorded when TICKET-503's second copy landed.
+
+---
+
 ## ISSUE-018 — `apps/web` gained a jsdom component-test runner; TICKET-506 had read CONTRACTS §8 as barring one
 
 Status: OPEN

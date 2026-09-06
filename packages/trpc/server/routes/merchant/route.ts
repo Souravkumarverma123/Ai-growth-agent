@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 
+import { getCampaignBudgetBreakdown } from "@repo/database/repositories/campaign-budget-snapshot";
 import {
   approveMerchantPolicy,
   getMerchantPolicy,
@@ -11,8 +12,9 @@ import { publicProcedure, router } from "../../trpc";
 import { generatePath } from "../../utils/path-generator";
 
 /**
- * FROZEN CONTRACT — PRD.md §5, §6.5. Signatures only; bodies are stubs for
- * Phase 0 (TICKET-006). Implementations land in TICKET-501 and TICKET-503.
+ * FROZEN CONTRACT — PRD.md §5, §6.5. Signatures were fixed in Phase 0
+ * (TICKET-006). Bodies implemented in TICKET-501 (getPolicy / approvePolicy /
+ * setNegotiationEnabled) and TICKET-503 (getCampaignBudget).
  *
  * The MERCHANT-side console. Unlike the buyer surface, this may expose floors,
  * budgets and caps — this is the merchant's own data.
@@ -20,13 +22,6 @@ import { generatePath } from "../../utils/path-generator";
 
 const TAGS = ["Merchant"];
 const getPath = generatePath("/merchant");
-
-const notImplemented = (ticket: string) => {
-  throw new TRPCError({
-    code: "NOT_IMPLEMENTED",
-    message: `Stubbed during Phase 0 contract freeze. Implemented by ${ticket}.`,
-  });
-};
 
 const commitmentValueSchema = z.object({
   commitmentType: z.enum(["PREPAID", "NON_RETURNABLE", "EXTENDED_DELIVERY_WINDOW"]),
@@ -125,7 +120,13 @@ export const merchantRouter = router({
       return result;
     }),
 
-  /** available = total - reserved - committed. The number that counts down. */
+  /**
+   * available = total - reserved - committed. The number that counts down as
+   * Tier 2 holds are reserved, and climbs back as they expire or release
+   * (TICKET-503). All four figures are derived from `campaign_holds` — see
+   * `getCampaignBudgetBreakdown`. This is the merchant's own data, so unlike
+   * the buyer surface it may expose the budget (CONTRACTS.md §9).
+   */
   getCampaignBudget: publicProcedure
     .meta({ openapi: { method: "GET", path: getPath("/campaign-budget"), tags: TAGS } })
     .input(z.object({ merchantId: z.string() }))
@@ -137,5 +138,14 @@ export const merchantRouter = router({
         availableMinor: z.number().int().nonnegative(),
       }),
     )
-    .query(async () => notImplemented("TICKET-503")),
+    .query(async ({ input, ctx }) => {
+      const breakdown = await getCampaignBudgetBreakdown(ctx.db, input.merchantId);
+      if (!breakdown) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `No policy found for merchant ${input.merchantId}`,
+        });
+      }
+      return breakdown;
+    }),
 });
