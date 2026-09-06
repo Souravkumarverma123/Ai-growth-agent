@@ -97,6 +97,11 @@ RAZORPAY_KEY_ID=rzp_test_xxxxxxxxxxxx           # Razorpay test-mode credentials
 RAZORPAY_KEY_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+`pnpm dev` runs through Turbo in strict env mode, so a root-`.env` value only
+reaches a task if it's listed in `turbo.json`'s `globalPassThroughEnv` (these
+four are). Add any new required env var there too, or it silently won't be
+visible under `pnpm dev`.
+
 Then:
 
 ```bash
