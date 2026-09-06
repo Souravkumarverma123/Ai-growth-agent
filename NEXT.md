@@ -1,7 +1,7 @@
 # NEXT — Ticket Solve Order
 
 The live, ordered queue of what's left. Generated from `Tickets.md`'s
-statuses/dependencies on 2026-09-06 (re-derived after TICKET-206 closed) —
+statuses/dependencies on 2026-09-06 (re-derived after TICKET-603 closed) —
 **re-derive this whenever a ticket flips to `DONE` or a new one is added**,
 don't hand-edit around a stale ordering. Full acceptance criteria live in
 `Tickets.md`; this file only answers "what's next and why."
@@ -11,25 +11,26 @@ P2), with the payment control-path and invariant suites ahead of `apps/web`
 UI polish — per `Tickets.md`'s own stated philosophy ("depth of the core
 invariant beats feature count").
 
-39 of 46 tickets are `DONE`. 7 remain.
+40 of 46 tickets are `DONE`. 6 remain.
 
 ## Solve in this order
 
-1. **[TICKET-603](Tickets.md#ticket-603--invariant-suite-injection-resistance-and-eligibility)** — Invariant suite: injection resistance and eligibility · P0 · ready now
-   The last invariant-suite P0. Its dependency (TICKET-206, Phase 2 close) is now done.
-2. **[TICKET-506](Tickets.md#ticket-506--minimal-buyer-surface)** — Minimal buyer surface · P1 · ready now
+1. **[TICKET-506](Tickets.md#ticket-506--minimal-buyer-surface)** — Minimal buyer surface · P1 · ready now
    Most demo-visible of the remaining UI work — do this before the smaller display widgets.
-3. **[TICKET-502](Tickets.md#ticket-502--live-negotiation-event-stream)** — Live negotiation event stream · P1 · ready now
-4. **[TICKET-503](Tickets.md#ticket-503--campaign-budget-countdown)** — Campaign budget countdown · P1 · ready now
-5. **[TICKET-505](Tickets.md#ticket-505--audit-trail-display)** — Audit trail display · P1 · ready now
-6. **[TICKET-504](Tickets.md#ticket-504--offer-status-and-ttl-display)** — Offer status and TTL display · P2 · ready now · drop first if time runs out
-7. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
+2. **[TICKET-502](Tickets.md#ticket-502--live-negotiation-event-stream)** — Live negotiation event stream · P1 · ready now
+3. **[TICKET-503](Tickets.md#ticket-503--campaign-budget-countdown)** — Campaign budget countdown · P1 · ready now
+4. **[TICKET-505](Tickets.md#ticket-505--audit-trail-display)** — Audit trail display · P1 · ready now
+5. **[TICKET-504](Tickets.md#ticket-504--offer-status-and-ttl-display)** — Offer status and TTL display · P2 · ready now · drop first if time runs out
+6. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
+
+The last invariant-suite P0 (TICKET-603) is now `DONE` — every remaining
+ticket is `apps/web` UI work.
 
 ## Parallelizable right now
 
 Everything remaining has all its dependencies satisfied *today* — a good set
-to hand to separate worktree-isolated agents simultaneously: `603`, `502`,
-`503`, `505`, `506`, `504`, `508`.
+to hand to separate worktree-isolated agents simultaneously: `502`, `503`,
+`505`, `506`, `504`, `508`.
 
 ## Known blockers worth knowing about before you start
 
