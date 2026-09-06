@@ -115,15 +115,25 @@ system flags a cart `AT_RISK` and hands the buyer agent its id). To exercise
 the `apps/web` console end to end locally, create one by hand:
 
 ```bash
-pnpm --filter @repo/database db:seed-session   # prints a session id + the console URLs
+pnpm --filter @repo/database db:seed-session demo   # prints a session id + the console URLs
 ```
 
-Open the buyer console it prints, send a message, then **Decline & continue**
-each offer — after round 3 the next proposal hits the round cap, the session
-ends `WALKED_AWAY`, and the walk-away card appears on that session's audit
-trail. (`db:seed-session` needs `DATABASE_URL` in the environment, same as
-`db:seed`; it never touches an existing session, so run it again for a fresh
-one.)
+Open the **buyer console** it prints, send a message, then **Decline &
+continue**. The offer total drops each round; after your first refusal the
+merchant agent funds a **Tier 2 rescue** from the campaign budget — visible
+live on `/merchant/sessions/<id>/audit` as `HOLD_RESERVED` +
+`DILUTION_WITHIN_CAPS` with the campaign spend. **Accept** that offer to close
+the deal, or keep declining to the round limit (`WALKED_AWAY`) — the
+walk-away card then renders at the top of the audit trail.
+
+Without the `demo` argument you get the exact PRD §18.2 merchant (₹200
+per-deal cap): offers stay Tier 1, and the run ends at the round limit — no
+campaign-funded rescue is feasible under that cap (`issue-tracker.md`
+ISSUE-017). `db:seed-session` needs `DATABASE_URL` in the environment, same
+as `db:seed`; it never touches an existing session, so run it again for a
+fresh one. Accepting an offer additionally needs `RAZORPAY_KEY_ID` /
+`RAZORPAY_KEY_SECRET` (order creation) — everything up to and including the
+walk-away works without them.
 
 ```bash
 pnpm check-types     # across every package

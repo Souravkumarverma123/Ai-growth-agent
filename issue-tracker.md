@@ -937,6 +937,25 @@ Tier 2 categorically infeasible on the reference cart). The DB-backed
 `propose` path is unchanged and still has no Tier-2-reaching fixture — this
 sub-issue stays OPEN for it.
 
+**Update 2026-09-07 (FIXED):** closed for the `propose` path too.
+`DeterministicMerchantModel` (`packages/trpc/server/routes/negotiation/
+merchant-model.ts`) now picks the lowest-total exposed candidate
+(`pickConcessionCandidate`) instead of `selectCandidate`'s
+highest-contribution ordering — the same concession rule `DemoMerchantModel`
+uses. A live negotiation now visibly concedes on price round over round, and
+once a Tier 1 refusal unlocks Tier 2 the merchant funds the rescue from the
+campaign budget. `packages/trpc/tests/demo-negotiation.test.ts` drives
+`open → propose → decline → propose` against a real Postgres and asserts the
+round-2 offer is cheaper than round 1, `DILUTION_WITHIN_CAPS`, and
+`campaignSpendMinor > 0` on both the `HOLD_RESERVED` and mint events. The
+₹700 cap it needs is the `demo` scenario of the dev helper
+(`pnpm --filter @repo/database db:seed-session demo` → a dedicated demo
+merchant; `seed.ts` still writes ₹200 for §18.2). No frozen contract changed
+— `merchant-model.ts` is a documented stand-in, not a frozen signature.
+The reason-code granularity gap on the walk-away itself (a cap-bound run
+still ends `ROUND_LIMIT_REACHED`, not `DILUTION_EXCEEDS_PER_DEAL_CAP`,
+because a feasible Tier 1 fallback always exists) is ISSUE-022, not this.
+
 ---
 
 ## ISSUE-011 — No agreed buyer-facing money-formatting boundary exists yet, so TICKET-203's composed messages carry raw minor units
