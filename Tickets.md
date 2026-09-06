@@ -1061,13 +1061,49 @@ Good tests here assert **external behaviour**, never internal structure. "A Tier
 
 ### TICKET-602 — Invariant suite: offer lifecycle and idempotency
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 1, TICKET-302
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 1, TICKET-302
 
 **Scope and required assertions.**
-- One offer cannot create multiple orders, including under concurrency.
-- An expired offer cannot be consumed.
-- A consumed offer cannot be consumed again.
-- A basket altered between mint and accept is refused.
+- One offer cannot create multiple orders, including under concurrency. ✅
+  `packages/payments/tests/invariants-offer-lifecycle.test.ts`: N concurrent
+  `reserveOrder` for one offer (2/5/20) against real Postgres leave exactly
+  one committed `orders` row — every loser a clean `ORDER_ALREADY_EXISTS`
+  domain result, never a thrown Postgres error — plus sequential-retry and
+  per-offer-not-global-lock cases, and a raw duplicate `INSERT` proving the
+  guarantee is our own unique constraint (`23505`), not a rail-supplied key.
+- An expired offer cannot be consumed. ✅ Policy suite: 300 randomized
+  post-expiry trials + inclusive boundary. Payments suite: past-TTL refusal
+  leaves `consumed_at` null + the transactional CAS boundary (accepted at
+  `expiresAt`, refused one ms later).
+- A consumed offer cannot be consumed again. ✅ Payments suite:
+  `it.each([2,10,25])` concurrent `acceptOffer`, each its own transaction —
+  a real compare-and-set race — leaves exactly one consumption; losers all
+  `OFFER_ALREADY_CONSUMED`. Policy suite: 300 randomized trials + a
+  mint→accept→replay sequence.
+- A basket altered between mint and accept is refused. ✅ Policy suite: 9
+  single-field mutators × 40 randomized minted baskets, plus 200
+  identical-reconstruction accepts and commitment-order-insensitivity.
+  Payments suite: 5 mutation cases refused transactionally with the offer
+  left live for a correct accept afterwards.
+
+Additive test-only coverage beyond the four: the refusal precedence
+(expiry → consumed → basket), currency mismatch, and a structural check that
+the `acceptance` barrel stays a pure decision rule with no mutation path
+(two callers handed the same unconsumed snapshot both "succeed" — which is
+*why* the exactly-once guarantee has to be the database's).
+
+**Note (2026-09-06):** `createOrder` (`packages/payments/src/create-order.ts`)
+is **not** exercised end-to-end against the test database here — its
+`offer-repository.ts` / `order-repository.ts` bind to the singleton `db`
+(ISSUE-012 sub-issue 12b), a different physical database from the sibling the
+shared harness uses. The payments-side suite drives the `@repo/database`
+repositories `createOrder` delegates to (`reserveOrder`, `acceptOffer`)
+directly against real Postgres instead — same repositories, no untestable
+singleton in the way, same workaround TICKET-304/305 used. `createOrder`'s
+own wrapper composition (reserve strictly before the Razorpay POST) stays
+covered by `create-order.test.ts`. `reserveOrder` has no offer-expiry or
+consumed guard by design — the accept step upstream is where a dead offer is
+stopped, before order creation is ever reached. No production code changed.
 
 **Affected.** `packages/policy`, `packages/payments`
 
