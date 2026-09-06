@@ -3,13 +3,14 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import {
   resolveHoldCommittedTransition,
+  resolveHoldReleaseTransition,
   resolveRailReportTransition,
   type RailReportOutcome,
 } from "@repo/policy";
-import type { NegotiationState, TransitionSource } from "@repo/policy/contracts";
+import type { NegotiationState, StateTransition, TransitionSource } from "@repo/policy/contracts";
 
 import { appendAuditEvent } from "@repo/database/repositories/audit-events";
-import { commitCampaignHold } from "@repo/database/repositories/campaign-holds";
+import { commitCampaignHold, releaseCampaignHold } from "@repo/database/repositories/campaign-holds";
 import { getCampaignHoldByOfferId } from "@repo/database/repositories/campaign-budget-snapshot";
 import {
   getNegotiationSessionForUpdate,
@@ -44,18 +45,28 @@ import type { RailStateSource } from "./rail-state-source";
  * our own record" check CONTRACTS.md §6 asks for at a money boundary.
  *
  * ============================================================================
- * WHAT THIS FUNCTION DELIBERATELY DOES NOT DO
+ * HOLD UNWINDING ON A TERMINAL RECONCILIATION (TICKET-305)
  * ============================================================================
- * On `FAILED` or `CONTRADICTS_LOCAL`, this function moves the session to
- * `PAYMENT_FAILED` and records the correct ledger event — it does NOT
- * release a Tier 2 offer's campaign hold. That is TICKET-305's job
- * ("Divergence and failure handling"), which explicitly owns "hold released
- * exactly once" and the ordering guarantee ("the divergence event precedes
- * the corrective event in the ledger") as its own acceptance criteria — not
- * duplicated here. On `CAPTURED`, though, committing a Tier 2 hold (moving
- * it from a provisional reservation to a permanent spend) is this
- * function's own job: it is the natural conclusion of a successful
- * reconciliation, not a failure-path concern TICKET-305 owns.
+ * A Tier 2 offer carries a provisional campaign-budget hold. Whichever way
+ * reconciliation ends, that hold must reach its final state in the SAME
+ * transaction as the session transition, so the ledger can never show a
+ * settled/failed session with a still-`RESERVED` hold:
+ *
+ *  - `CAPTURED`  -> commit the hold (provisional reservation becomes a
+ *                   permanent spend) — the natural conclusion of success.
+ *  - `FAILED` /  -> release the hold (its amount returns to available
+ *    `CONTRADICTS_LOCAL`   budget), per PRD §12 ("divergence releases any
+ *                   campaign hold") and §17 rows 6-7.
+ *
+ * TICKET-305's ordering guarantee ("the divergence event precedes the
+ * corrective event in the ledger") falls out for free: the
+ * failure/divergence event is appended above, before this block runs, so the
+ * `HOLD_RELEASED` event this block writes necessarily follows it in
+ * sequence. "Hold released exactly once" is upheld two ways — the
+ * terminal-`localState` short-circuit at the top of this function stops a
+ * later poll cycle from re-entering here at all, and `releaseCampaignHold`'s
+ * own conditional `WHERE state = 'RESERVED'` update is a no-op (no ledger
+ * event) on an already-released hold even if it somehow did.
  */
 
 export type ReconcileOutcome =
@@ -67,6 +78,22 @@ export type ReconcileOutcome =
 
 function fromStateOf(source: TransitionSource): NegotiationState | null {
   return source === "*" ? null : source;
+}
+
+/**
+ * Turns a resolved `StateTransition` into the ledger context
+ * `commitCampaignHold` / `releaseCampaignHold` need. The hold repositories
+ * add `holdId` / `amountMinor` / `offerId` from the hold row themselves — the
+ * caller only supplies which session and which transition.
+ */
+function holdLedgerContextFor(sessionId: string, transition: StateTransition) {
+  return {
+    sessionId,
+    eventType: transition.event,
+    fromState: fromStateOf(transition.from),
+    toState: transition.to,
+    reasonCode: transition.reasonCode,
+  };
 }
 
 export async function reconcileOrder(
@@ -186,17 +213,22 @@ export async function reconcileOrder(
       railPayload: report.payload,
     });
 
-    if (outcome === "CAPTURED" && offer.tier === 2) {
+    // Unwind a Tier 2 offer's campaign hold to match the reconciliation's
+    // outcome — commit on success, release on failure/divergence (TICKET-305;
+    // see the module doc's "HOLD UNWINDING" section for the ordering and
+    // exactly-once guarantees).
+    if (offer.tier === 2) {
       const hold = await getCampaignHoldByOfferId(tx, offer.id);
       if (hold) {
-        const commitTransition = resolveHoldCommittedTransition(2);
-        await commitCampaignHold(tx, hold.id, {
-          sessionId: session.id,
-          eventType: commitTransition.event,
-          fromState: fromStateOf(commitTransition.from),
-          toState: commitTransition.to,
-          reasonCode: commitTransition.reasonCode,
-        });
+        if (outcome === "CAPTURED") {
+          await commitCampaignHold(tx, hold.id, holdLedgerContextFor(session.id, resolveHoldCommittedTransition(2)));
+        } else {
+          await releaseCampaignHold(
+            tx,
+            hold.id,
+            holdLedgerContextFor(session.id, resolveHoldReleaseTransition("PAYMENT_FAILED", 2)),
+          );
+        }
       }
     }
 

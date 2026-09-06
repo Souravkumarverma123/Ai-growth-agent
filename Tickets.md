@@ -711,18 +711,20 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-305 — Divergence and failure handling
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** TICKET-304, TICKET-108
+**Status:** DONE · **Priority:** P0 · **Dependencies:** TICKET-304, TICKET-108
 
 **Objective.** Record the disagreement before resolving it, and unwind the hold.
 
 **Scope.** `RAIL_STATE_DIVERGENCE` written **before** the correction is applied. Hold released. Session moves to `PAYMENT_FAILED`.
 
 **Acceptance criteria.**
-- The divergence event precedes the corrective event in the ledger.
-- Hold is released exactly once.
-- The disagreement is reconstructable from the ledger alone.
+- The divergence event precedes the corrective event in the ledger. ✅ `reconcileOrder` (`packages/payments/src/reconcile-order.ts`) appends the `RAIL_STATE_DIVERGENCE` / `PAYMENT_FAILED` event, then overwrites local belief, then releases the Tier 2 hold — so the `HOLD_RELEASED` event is always a higher sequence than the divergence/failure event. `reconcile-order.test.ts` asserts the ledger index ordering for both a FAILED and a divergent report.
+- Hold is released exactly once. ✅ Two guards: the terminal-`localState` short-circuit at the top of `reconcileOrder` stops a later poll cycle re-entering, and `releaseCampaignHold`'s conditional `WHERE state = 'RESERVED'` UPDATE appends no ledger event on an already-released hold. Tested by "releases a diverged Tier 2 hold exactly once, even across repeated reconciliation" and the already-released-hold no-op test.
+- The disagreement is reconstructable from the ledger alone. ✅ The `RAIL_STATE_DIVERGENCE` event's payload carries `expectedAmountMinor` and `capturedAmountMinor` (set in TICKET-304); the `HOLD_RELEASED` event carries `holdId` / `amountMinor`. Asserted in `reconcile-order.test.ts`.
 
-**Tests required.** Ledger ordering test. Hold released exactly once on divergence.
+**Tests required.** Ledger ordering test. ✅ Hold released exactly once on divergence. ✅ Both in `packages/payments/tests/reconcile-order.test.ts`.
+
+**Note (2026-09-06):** the frozen state machine models a rail report as a single moment with three readings — there is no separate "corrective" transition row from `AWAITING_PAYMENT`, so the `HOLD_RELEASED` self-loop on `PAYMENT_FAILED` IS the corrective event the ordering criterion refers to. FAILED and CONTRADICTS_LOCAL both release the hold via the same `PAYMENT_FAILED --HOLD_RELEASED--> PAYMENT_FAILED` transition (`resolveHoldReleaseTransition`). No frozen contract changed; `packages/policy` needed no edit — `resolveHoldReleaseTransition` already existed from TICKET-402.
 
 **Affected.** `packages/payments`, `packages/policy`
 

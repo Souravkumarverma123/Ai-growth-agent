@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { Basket } from "@repo/policy/contracts";
@@ -13,7 +13,7 @@ import {
   offersTable,
   ordersTable,
 } from "@repo/database/schema";
-import { reserveCampaignBudget } from "@repo/database/repositories/campaign-holds";
+import { releaseCampaignHold, reserveCampaignBudget } from "@repo/database/repositories/campaign-holds";
 
 import { reconcileOrder } from "../src/reconcile-order";
 import type { RailOrderReport, RailStateSource } from "../src/rail-state-source";
@@ -284,6 +284,124 @@ describe("reconcileOrder", () => {
 
     const events = await db.select().from(auditEventsTable).where(eq(auditEventsTable.sessionId, fixture.sessionId));
     expect(events.map((e) => e.reasonCode)).toContain("RAIL_STATE_DIVERGENCE");
+  });
+
+  /**
+   * TICKET-305 — divergence and failure handling. `reconcileOrder` (via
+   * TICKET-304) already moves the session to PAYMENT_FAILED and records the
+   * failure/divergence event on both a FAILED and a divergent report; this
+   * ticket owns the other half — a Tier 2 offer's campaign hold is unwound,
+   * exactly once, and the divergence/failure event precedes that corrective
+   * HOLD_RELEASED event in the ledger (PRD §12, §17 rows 6-7).
+   */
+  it("a FAILED report on a Tier 2 offer releases its campaign hold, after the PAYMENT_FAILED event in the ledger", async () => {
+    const db = await getTestDb();
+    const fixture = await insertAwaitingPaymentFixture(db, { tier: 2, totalMinor: 230_000 });
+    const rail = new FixedRailStateSource({ railState: "FAILED", payload: { status: "failed" } });
+
+    const outcome = await reconcileOrder(db, rail, fixture.orderId);
+    expect(outcome).toEqual({ status: "FAILED" });
+
+    const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.offerId, fixture.offerId));
+    expect(hold!.state).toBe("RELEASED");
+
+    const events = await db
+      .select()
+      .from(auditEventsTable)
+      .where(eq(auditEventsTable.sessionId, fixture.sessionId))
+      .orderBy(asc(auditEventsTable.sequence));
+    const codes = events.map((e) => e.reasonCode);
+    expect(codes).toContain("PAYMENT_FAILED");
+    expect(codes).toContain("HOLD_RELEASED");
+    expect(codes.indexOf("PAYMENT_FAILED")).toBeLessThan(codes.indexOf("HOLD_RELEASED"));
+  });
+
+  it("a divergent report on a Tier 2 offer releases its campaign hold, and RAIL_STATE_DIVERGENCE precedes HOLD_RELEASED in the ledger", async () => {
+    const db = await getTestDb();
+    const fixture = await insertAwaitingPaymentFixture(db, { tier: 2, totalMinor: 230_000 });
+    const rail = new FixedRailStateSource({
+      railState: "CAPTURED",
+      capturedAmountMinor: 999_000,
+      payload: { status: "captured", amount: 999_000 },
+    });
+
+    const outcome = await reconcileOrder(db, rail, fixture.orderId);
+    expect(outcome).toEqual({ status: "DIVERGED" });
+
+    const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.offerId, fixture.offerId));
+    expect(hold!.state).toBe("RELEASED");
+
+    const events = await db
+      .select()
+      .from(auditEventsTable)
+      .where(eq(auditEventsTable.sessionId, fixture.sessionId))
+      .orderBy(asc(auditEventsTable.sequence));
+    const codes = events.map((e) => e.reasonCode);
+    expect(codes.indexOf("RAIL_STATE_DIVERGENCE")).toBeGreaterThanOrEqual(0);
+    expect(codes.indexOf("RAIL_STATE_DIVERGENCE")).toBeLessThan(codes.indexOf("HOLD_RELEASED"));
+
+    // The disagreement is reconstructable from the ledger alone: the
+    // divergence event carries both the amount we expected and the amount the
+    // rail reported.
+    const divergence = events.find((e) => e.reasonCode === "RAIL_STATE_DIVERGENCE");
+    expect(divergence!.payload).toMatchObject({ expectedAmountMinor: 230_000, capturedAmountMinor: 999_000 });
+  });
+
+  it("releases a diverged Tier 2 hold exactly once, even across repeated reconciliation", async () => {
+    const db = await getTestDb();
+    const fixture = await insertAwaitingPaymentFixture(db, { tier: 2, totalMinor: 230_000 });
+    const rail = new FixedRailStateSource({
+      railState: "CAPTURED",
+      capturedAmountMinor: 999_000,
+      payload: { status: "captured", amount: 999_000 },
+    });
+
+    const first = await reconcileOrder(db, rail, fixture.orderId);
+    expect(first).toEqual({ status: "DIVERGED" });
+    const second = await reconcileOrder(db, rail, fixture.orderId);
+    expect(second).toEqual({ status: "ALREADY_RECONCILED" });
+
+    const events = await db.select().from(auditEventsTable).where(eq(auditEventsTable.sessionId, fixture.sessionId));
+    expect(events.filter((e) => e.reasonCode === "HOLD_RELEASED")).toHaveLength(1);
+
+    const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.offerId, fixture.offerId));
+    expect(hold!.state).toBe("RELEASED");
+  });
+
+  it("a FAILED report whose Tier 2 hold was already released (e.g. by TTL) is a safe no-op: no second HOLD_RELEASED", async () => {
+    const db = await getTestDb();
+    const fixture = await insertAwaitingPaymentFixture(db, { tier: 2, totalMinor: 230_000 });
+
+    const [hold] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.offerId, fixture.offerId));
+    await releaseCampaignHold(db, hold!.id, {
+      sessionId: fixture.sessionId,
+      eventType: "HOLD_RELEASED",
+      fromState: "EXPIRED",
+      toState: "EXPIRED",
+      reasonCode: "HOLD_RELEASED",
+    });
+
+    const rail = new FixedRailStateSource({ railState: "FAILED", payload: { status: "failed" } });
+    const outcome = await reconcileOrder(db, rail, fixture.orderId);
+    expect(outcome).toEqual({ status: "FAILED" });
+
+    const [after] = await db.select().from(campaignHoldsTable).where(eq(campaignHoldsTable.offerId, fixture.offerId));
+    expect(after!.state).toBe("RELEASED");
+
+    const events = await db.select().from(auditEventsTable).where(eq(auditEventsTable.sessionId, fixture.sessionId));
+    expect(events.filter((e) => e.reasonCode === "HOLD_RELEASED")).toHaveLength(1);
+  });
+
+  it("a FAILED report on a Tier 1 offer touches no campaign hold and emits no HOLD_RELEASED", async () => {
+    const db = await getTestDb();
+    const fixture = await insertAwaitingPaymentFixture(db, { tier: 1 });
+    const rail = new FixedRailStateSource({ railState: "FAILED", payload: { status: "failed" } });
+
+    const outcome = await reconcileOrder(db, rail, fixture.orderId);
+    expect(outcome).toEqual({ status: "FAILED" });
+
+    const events = await db.select().from(auditEventsTable).where(eq(auditEventsTable.sessionId, fixture.sessionId));
+    expect(events.map((e) => e.reasonCode)).not.toContain("HOLD_RELEASED");
   });
 
   it("is idempotent: reconciling an already-CAPTURED order a second time is a no-op, never a second ledger entry", async () => {
