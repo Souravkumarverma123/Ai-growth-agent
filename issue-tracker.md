@@ -408,6 +408,17 @@ test-db harness (TICKET-303, TICKET-304, TICKET-305, TICKET-306) — worth
 considering whether `getOfferById`/`createOrder` should take an optional
 `NodePgDatabase` parameter, matching every other repository in this repo.
 
+**2026-09-06 (TICKET-602):** hit again writing the offer-lifecycle invariant
+suite. The database-enforced invariants (one offer → one order under
+concurrency; consume-exactly-once) genuinely need a real Postgres, and
+`createOrder`'s singleton still can't reach the sibling test DB. Worked
+around the same way TICKET-304/305 did — by testing the `@repo/database`
+repositories `createOrder` delegates to (`reserveOrder`, `attachRailOrder`,
+`acceptOffer`), which ARE generic over `NodePgDatabase`, directly against
+`getTestDb()` from a `packages/payments` test file. `createOrder`'s own thin
+wrapper stays covered by the fully-mocked `create-order.test.ts`. Still worth
+the optional-parameter refactor eventually; not blocking.
+
 ### 12c. `acceptOffer`'s frozen input schema carries no separate "basket the buyer is accepting" field
 
 TICKET-006's frozen `acceptOffer` input is `{ negotiationId, offerId }` only
