@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { AlertCircle, CircleDot, RefreshCw } from "lucide-react";
 
 import { trpc } from "~/trpc/client";
@@ -57,7 +58,13 @@ export function MerchantEventStream({ sessionId }: { sessionId: string }) {
     },
   );
 
-  const rows = toEventStreamRows(query.data?.events ?? []);
+  // react-query's structural sharing keeps `events` referentially stable
+  // across polls that returned nothing new, so an unchanged ledger costs one
+  // identity check, not a re-sort / re-map / re-mount. (A negotiation is
+  // round-capped, so the list is small and bounded regardless.)
+  const events = query.data?.events;
+  const rows = useMemo(() => toEventStreamRows(events ?? []), [events]);
+  const settled = useMemo(() => rows.length > 0 && isStreamSettled(events ?? []), [rows, events]);
 
   return (
     <EventStreamView
@@ -66,7 +73,7 @@ export function MerchantEventStream({ sessionId }: { sessionId: string }) {
       isError={query.isError}
       errorMessage={query.error?.message ?? null}
       isFetching={query.isFetching}
-      isSettled={rows.length > 0 && isStreamSettled(query.data?.events ?? [])}
+      isSettled={settled}
       lastUpdatedAt={query.dataUpdatedAt}
     />
   );
