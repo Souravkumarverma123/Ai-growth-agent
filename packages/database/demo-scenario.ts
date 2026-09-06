@@ -14,11 +14,23 @@ import { CURRENCY } from "@repo/policy/contracts";
  *
  * This is a SEPARATE demo merchant with a ₹700 per-deal cap — the same widen
  * the pure-engine demo harness uses (`packages/agent/demo/reference-scenario.ts`).
- * With it, a `propose` negotiation shows the whole story end to end: a Tier 1
- * offer, then (after a refusal unlocks Tier 2) a campaign-funded rescue whose
- * total drops round over round, then a walk-away once the shortfall outgrows
- * the cap. Nothing frozen changes — this merchant is not seeded by `db:seed`
- * and no test asserts against it; `seed.ts` still writes ₹200 for §18.2.
+ * With it, a `propose` negotiation shows the whole story: a Tier 1 offer,
+ * then (after a refusal unlocks Tier 2) a campaign-funded rescue at a lower
+ * total — the per-deal cap is what bounds that rescue to ₹665 rather than
+ * the full ₹950 of headroom. Accept the rescue to close the deal, or keep
+ * declining: with `maxRounds: 2` the next proposal hits the round limit and
+ * the session ends `WALKED_AWAY` (`ROUND_LIMIT_REACHED`). Nothing frozen
+ * changes — this merchant is not seeded by `db:seed` and no test asserts
+ * against it; `seed.ts` still writes ₹200 for §18.2.
+ *
+ * NOTE: a *cap-bound* walk-away (`NO_FEASIBLE_BASKET` /
+ * `DILUTION_EXCEEDS_PER_DEAL_CAP`, the reason code that makes the walk-away
+ * card say "a cap of ₹X would have closed it") is deliberately NOT what this
+ * scenario produces — a feasible self-funding Tier 1 candidate always exists
+ * on a normal catalogue, so the round limit is reached first (issue-tracker.md
+ * ISSUE-022). Reproducing a cap-bound walk-away end to end needs a contrived
+ * catalogue with no reachable self-funding move, out of scope for this dev
+ * fixture.
  *
  * All ids are fixed v4 UUIDs so the upsert is idempotent. All money is
  * integer minor units (CONTRACTS.md §3).

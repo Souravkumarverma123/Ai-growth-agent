@@ -48,8 +48,10 @@ import {
  *   - `demo`: a dedicated demo merchant with a ₹700 cap, provisioned by this
  *     script itself (idempotent, does not touch `db:seed`'s data). A
  *     negotiation here shows the whole arc: Tier 1 offer → refuse → a
- *     campaign-funded Tier 2 rescue whose total drops round over round →
- *     accept it, or push once more and the per-deal cap binds → walk away.
+ *     campaign-funded Tier 2 rescue at a lower total → accept it to close the
+ *     deal, or keep declining and the next proposal hits the 2-round limit
+ *     (`ROUND_LIMIT_REACHED` → `WALKED_AWAY`). See `demo-scenario.ts` on why
+ *     this is a round-limit, not a cap-bound, walk-away.
  */
 
 const DEV_BUYER_AGENT_ID = "dev-buyer-agent";
@@ -199,18 +201,19 @@ if (require.main === module) {
       ];
       if (scenario === "demo") {
         lines.push(
-          "Walkthrough: in the buyer console send a message, then repeatedly",
-          '"Decline & continue". The offer total drops each round; after a',
-          "refusal the agent funds a Tier 2 rescue from the campaign budget",
-          "(visible on the audit trail). Accept it to close the deal, or keep",
-          "declining until the per-deal cap binds and the session WALKS AWAY —",
-          "the walk-away card then explains what cap would have closed it.",
+          "Walkthrough: in the buyer console send a message, then",
+          '"Decline & continue". Round 1 is a Tier 1 offer; refuse it and',
+          "round 2 is a campaign-funded Tier 2 rescue at a lower total —",
+          "HOLD_RESERVED + DILUTION_WITHIN_CAPS with the campaign spend show",
+          "live on the audit trail. Accept the rescue to close the deal, or",
+          "decline again — the next proposal hits the 2-round limit and the",
+          "session ends WALKED_AWAY, with the walk-away card on the audit trail.",
         );
       } else {
         lines.push(
           "This is the §18.2 scenario (₹200 cap): offers stay Tier 1 and the",
-          "session ends at the round limit. For the full Tier 2 rescue + cap",
-          "story, run:  pnpm --filter @repo/database db:seed-session demo",
+          "session ends at the round limit. For the Tier 2 rescue story, run:",
+          "  pnpm --filter @repo/database db:seed-session demo",
         );
       }
       lines.push("");
