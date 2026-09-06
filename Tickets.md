@@ -590,18 +590,25 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-206 — Buyer agent harness
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-201, TICKET-205
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-201, TICKET-205
 
 **Objective.** An independent buyer agent with hidden constraints, for the demo and for tests.
 
 **Scope.** Stock model. System prompt contains **only** a budget, a goal, and negotiating latitude — no script, no target outcome, no knowledge of floors, tiers, or budget. Reservation price hidden from the merchant agent. Configurable budget so two runs can produce different endings.
 
 **Acceptance criteria.**
-- The prompt is displayable on screen and visibly contains no script.
-- Two different budgets produce materially different outcomes — one closing, one walking away.
-- The merchant agent never receives the reservation price.
+- The prompt is displayable on screen and visibly contains no script. ✅ `renderBuyerSystemPrompt` (`packages/agent/buyer/buyer-prompt.ts`) renders a fixed 13-line frame with three slots — `budgetMinor`, `goal`, `latitude` — and nothing else. `packages/agent/tests/buyer-prompt.test.ts` asserts it carries exactly those three values, says "no script" / "no required outcome", contains no `floor` / `tier` / `concession` / `curve` / `campaign` / `per-deal` / `counterfactual` / `candidate` substring, has no step-list or target-price phrasing, and that the only number in it is the budget itself. `pnpm --filter @repo/agent demo` prints it to screen above both runs.
+- Two different budgets produce materially different outcomes — one closing, one walking away. ✅ `CLOSING_RUN` (budget ₹2,100) and `WALK_AWAY_RUN` (budget ₹1,600) in `packages/agent/demo/demo-runs.ts` share goal, latitude, seed and scenario — only `budgetMinor` differs. `packages/agent/tests/demo-negotiation.test.ts` asserts the first ends `CLOSED` on the round-2 campaign-funded Tier 2 offer (`settledOffer.tier === 2`, `campaignSpendMinor > 0`, total ≤ budget) and the second ends `WALKED_AWAY` after a Tier 2 offer was reached but the round-3 per-deal cap forced the merchant back to Tier 1 — PRD §18.2's "a different limit binds" ending.
+- The merchant agent never receives the reservation price. ✅ Structural: `BuyerAgent.reactToOffer` is handed only `{ totalMinor, currency }` and returns `{ kind, message }` — no numeric field, and every message is drawn from a fixed pool with no digit in any phrase. Tests assert no buyer transcript turn in either documented run contains a digit or `String(budgetMinor)`.
 
-**Tests required.** Two seeded runs produce the two documented outcomes.
+**Tests required.** Two seeded runs produce the two documented outcomes. ✅ `packages/agent/tests/demo-negotiation.test.ts` (7 tests) drives both documented runs to their terminal state and also pins determinism (same config → identical transcript). Plus `buyer-agent.test.ts` (7) and `buyer-prompt.test.ts` (6). All 65 `@repo/agent` tests pass; `pnpm check-types` and `pnpm lint` green repo-wide; full `pnpm test` green.
+
+**Implementation notes (2026-09-06).**
+- New module `packages/agent/buyer/` — `BuyerConstraints` (budget + goal + latitude, nothing else), `renderBuyerSystemPrompt`, and `BuyerAgent`: a deterministic "stock model" stand-in (no model SDK exists in the lockfile and CI has no credentials; the "two seeded runs" criterion needs reproducibility). It accepts at/below its hidden budget, pushes back on an over-budget offer, and walks once its `patience` runs out — driven by a seeded PRNG that only ever picks *wording*, never a decision or an amount.
+- New module `packages/agent/demo/` — a pure harness (`runDemoNegotiation`) pairing `BuyerAgent` against the real engine pipeline (`generateCandidates → assignTiersAndFeasibility → runNegotiationRound → mintOffer`) with in-memory campaign-hold accounting. No database, no HTTP, no model SDK — stays inside B2 (`mintOffer` is the only engine entry point). `DemoMerchantModel` offers the lowest-total exposed candidate each round (a merchant genuinely chasing a deal with a price-sensitive buyer), which is what makes a Tier 2 offer actually reachable end to end — the tRPC `DeterministicMerchantModel` never picks one (ISSUE-012 sub-issue 12e).
+- `pnpm --filter @repo/agent demo` (`tsx demo/run-demo.ts`, new `tsx` devDep) prints the prompt and both transcripts.
+- **ISSUE-017** raised: on §18.2's own cart the frozen concession curve's smallest step (0.4 × ₹950 headroom = ₹380) already exceeds §18.2's own ₹200 per-deal cap, so no Tier 2 candidate is *generable* on that cart under that cap — §18.2's round-2 "₹2,300, shortfall exactly ₹200" offer cannot be produced by `generateCandidates`. `NEEDS_SPEC_DECISION`. Worked around here (not blocked) with a demo fixture whose per-deal cap is ₹700, documented inline in `reference-scenario.ts`; `packages/database/seed.ts` still seeds ₹200 for the live surface. Partially advances ISSUE-012 sub-issue 12e for the pure-engine path; the DB `propose` path is untouched.
+- No frozen contract changed.
 
 **Affected.** `packages/agent`, demo harness
 
