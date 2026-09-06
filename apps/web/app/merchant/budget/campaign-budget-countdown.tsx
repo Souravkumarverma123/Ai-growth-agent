@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertCircle, RefreshCw } from "lucide-react";
 
 import { trpc } from "~/trpc/client";
 import { cn } from "~/lib/utils";
@@ -12,12 +11,13 @@ import {
   type CampaignBudgetView,
 } from "~/lib/campaign-budget";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "~/components/ui/card";
+  MERCHANT_POLL_INTERVAL_MS,
+  MERCHANT_POLL_INTERVAL_SECONDS,
+  PollCard,
+  PollError,
+  PollLastChecked,
+  pollStatus,
+} from "~/components/merchant/poll-card";
 
 /**
  * TICKET-503 — Campaign budget countdown (PRD §6.5).
@@ -27,8 +27,6 @@ import {
  * as Tier 2 holds are reserved and climb back as they expire or release.
  * Read-only: there is no control here, the budget is set on the policy page.
  */
-
-const POLL_INTERVAL_MS = 2_000;
 
 const SEGMENT_CLASS: Record<CampaignBudgetSegmentKey, string> = {
   committed: "bg-emerald-600 dark:bg-emerald-500/80",
@@ -48,7 +46,7 @@ export function MerchantCampaignBudget({ merchantId }: { merchantId: string }) {
     {
       // The campaign budget is merchant-global and always live — there is no
       // terminal state to stop on, unlike a single session's event stream.
-      refetchInterval: POLL_INTERVAL_MS,
+      refetchInterval: MERCHANT_POLL_INTERVAL_MS,
       refetchIntervalInBackground: false,
       staleTime: 0,
     },
@@ -87,54 +85,37 @@ export function CampaignBudgetPanel({
   lastUpdatedAt?: number;
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <CardTitle className="text-base">Campaign budget</CardTitle>
-            <CardDescription>
-              The ceiling on lifetime dilutive (Tier 2) spend. Reserved rises and available falls
-              as an offer is minted; both return when it expires or is declined. Refreshes every{" "}
-              {Math.round(POLL_INTERVAL_MS / 1000)}s.
-            </CardDescription>
-          </div>
-          <span
-            className="text-muted-foreground inline-flex shrink-0 items-center gap-1 text-xs"
-            aria-live="polite"
-          >
-            <RefreshCw className={cn("size-3", isFetching && "animate-spin")} />
-            {isFetching ? "Refreshing" : "Live"}
-          </span>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {view ? (
-          // A snapshot we already have always stays on screen — a transient
-          // failure on one 2s poll must not blank out the merchant's last
-          // good figures. The failure is surfaced inline instead.
-          <BudgetBreakdown view={view} />
-        ) : isError ? (
-          <p className="text-destructive flex items-center gap-2 text-sm">
-            <AlertCircle className="size-4" />
-            Could not load the campaign budget{errorMessage ? `: ${errorMessage}` : "."}
-          </p>
-        ) : (
-          <p className="text-muted-foreground text-sm">Loading campaign budget…</p>
-        )}
-        {view && isError && (
-          <p className="text-destructive mt-4 flex items-center gap-2 text-[11px]">
-            <AlertCircle className="size-3" />
-            Last refresh failed{errorMessage ? `: ${errorMessage}` : "."} Showing the last known
-            figures.
-          </p>
-        )}
-        {view && !isError && lastUpdatedAt > 0 && (
-          <p className="text-muted-foreground mt-4 text-[11px]">
-            Last checked {new Date(lastUpdatedAt).toLocaleTimeString()}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+    <PollCard
+      title="Campaign budget"
+      description={
+        <>
+          The ceiling on lifetime dilutive (Tier 2) spend. Reserved rises and available falls as an
+          offer is minted; both return when it expires or is declined. Refreshes every{" "}
+          {MERCHANT_POLL_INTERVAL_SECONDS}s.
+        </>
+      }
+      status={pollStatus(isFetching)}
+    >
+      {view ? (
+        // A snapshot we already have always stays on screen — a transient
+        // failure on one 2s poll must not blank out the merchant's last
+        // good figures. The failure is surfaced inline instead.
+        <BudgetBreakdown view={view} />
+      ) : isError ? (
+        <PollError>
+          Could not load the campaign budget{errorMessage ? `: ${errorMessage}` : "."}
+        </PollError>
+      ) : (
+        <p className="text-muted-foreground text-sm">Loading campaign budget…</p>
+      )}
+      {view && isError && (
+        <PollError size="sm">
+          Last refresh failed{errorMessage ? `: ${errorMessage}` : "."} Showing the last known
+          figures.
+        </PollError>
+      )}
+      {view && !isError && <PollLastChecked at={lastUpdatedAt} />}
+    </PollCard>
   );
 }
 
