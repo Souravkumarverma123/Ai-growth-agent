@@ -562,17 +562,23 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-205 — MCP server adapter
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-204
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-204
 
 **Objective.** Expose the same procedures as MCP tools so a third-party agent can negotiate without bespoke integration.
 
 **Scope.** Thin adapter over the existing procedures. Public endpoint. The Scalar documentation URL is part of the submission.
 
 **Acceptance criteria.**
-- A stock model connected to the endpoint can complete a negotiation end to end.
-- Tool descriptions leak no policy internals.
+- A stock model connected to the endpoint can complete a negotiation end to end. ✅ `packages/trpc/server/mcp/` re-exposes the five buyer-facing `negotiationRouter` procedures (`get_session_context`, `open_negotiation`, `propose`, `respond_to_offer`, `accept_offer`) as MCP tools, each a 1:1 pass-through via `serverRouter.createCaller` using that procedure's own `negotiationInputSchemas` member — no logic, no state, no re-declared schema. `packages/trpc/tests/mcp-negotiation.test.ts` drives `open → propose → decline → propose → accept` to a payment handle both through an in-memory `Client`↔`McpServer` pair and through the real `POST /mcp` HTTP endpoint (SDK `StreamableHTTPClientTransport` against a Node server wrapping `createMcpHttpHandler`), all against real Postgres.
+- Tool descriptions leak no policy internals. ✅ Only the negotiation surface is exposed — no merchant-console or audit tool. The suite asserts the full serialized tool list (names, titles, descriptions, input schemas) contains no `floor` / `budget` / `per-deal` / `concession` / `curve` / `tier` substring; the procedures themselves already guarantee no such value is in a response (`response-shape.test.ts`). Error text is filtered too: only a `TRPCError` message reaches the buyer (same as tRPC's own HTTP surface); any other fault is collapsed to a generic string.
 
-**Tests required.** End-to-end negotiation driven through the MCP surface.
+**Tests required.** End-to-end negotiation driven through the MCP surface. ✅ `packages/trpc/tests/mcp-negotiation.test.ts` (5 tests, in-memory + real HTTP transport, real Postgres, `@repo/payments` mocked for the Razorpay HTTP call via a shared `tests/support/negotiation-fixtures.ts` helper).
+
+**Implementation notes (2026-09-06).**
+- Endpoint: `POST /mcp` on `apps/api`, stateless Streamable HTTP (`sessionIdGenerator: undefined`) — a negotiation's entire state already lives in Postgres keyed by `sessionId`/`negotiationId`, so there is nothing to keep in MCP session memory, and a stateless endpoint survives a restart / second replica. `GET`/`DELETE /mcp` return 405.
+- New dependency: `@modelcontextprotocol/sdk` (`packages/trpc` only — `apps/api` reaches it transitively through `@repo/trpc/server/mcp`, and `http.ts` deliberately takes no logger/HTTP-framework dependency, exposing an `onError` hook the host wires to its own logger). `packages/trpc` is the transport layer with no boundary lint rules, so this import is allowed there (the `@modelcontextprotocol/*` ban in `packages/eslint-config/boundaries.js` applies to `packages/policy`/`packages/payments` only).
+- `route.ts` change: the five inline `.input(z.object({…}))` schemas are hoisted to a named, exported `negotiationInputSchemas` and passed to `.input()` unchanged, so the MCP adapter reuses the exact shapes. Not a frozen-contract change — the shapes are identical, still the narrow buyer-facing surface §9 governs; adding an export is permitted by CONTRACTS.md §1. No behaviour changed; all 44 `@repo/trpc` tests pass.
+- No frozen contract changed. No issues found.
 
 **Affected.** `apps/api`, `packages/trpc`
 

@@ -7,6 +7,7 @@ import { generateOpenApiDocument, createOpenApiExpressMiddleware } from "trpc-to
 import { apiReference } from "@scalar/express-api-reference";
 
 import { serverRouter, createContext } from "@repo/trpc/server";
+import { createMcpHttpHandler } from "@repo/trpc/server/mcp";
 
 import { env } from "./env";
 
@@ -46,6 +47,31 @@ app.get("/openapi.json", (req, res) => {
 
 logger.debug(`docs: ${env.BASE_URL}/docs`);
 app.use("/docs", apiReference({ url: "/openapi.json" }));
+
+// TICKET-205 — MCP server adapter. A stateless Streamable-HTTP endpoint that
+// re-exposes the buyer-facing negotiation procedures as MCP tools, so a
+// third-party buyer agent can negotiate against this system with no bespoke
+// integration. Thin adapter — all behaviour is still the tRPC procedures
+// (`@repo/trpc/server/mcp`). The Scalar reference at `/docs` documents the
+// equivalent HTTP surface.
+const handleMcpRequest = createMcpHttpHandler(undefined, (err) =>
+  logger.error("MCP request failed", { err }),
+);
+logger.debug(`mcp: ${env.BASE_URL}/mcp`);
+app.post("/mcp", (req, res) => {
+  void handleMcpRequest(req, res, req.body);
+});
+
+// The endpoint is stateless (no SSE session to resume, no session to delete),
+// so the GET and DELETE halves of the Streamable HTTP spec do not apply here.
+const mcpMethodNotAllowed = (req: express.Request, res: express.Response) =>
+  res.status(405).json({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed. The MCP endpoint is stateless; use POST." },
+    id: null,
+  });
+app.get("/mcp", mcpMethodNotAllowed);
+app.delete("/mcp", mcpMethodNotAllowed);
 
 app.use(
   "/api",
