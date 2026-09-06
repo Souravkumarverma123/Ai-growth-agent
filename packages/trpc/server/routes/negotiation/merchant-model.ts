@@ -1,5 +1,4 @@
 import type { NegotiationModel, NegotiationRoundInput } from "@repo/agent";
-import { selectCandidate } from "@repo/policy";
 import type {
   Candidate,
   CandidateMoveType,
@@ -16,53 +15,62 @@ import type { TieredCandidate } from "@repo/policy";
  * ============================================================================
  * TICKET-201 (`packages/agent/model/negotiation-model.ts`) defines the
  * `NegotiationModel` interface and ships exactly one implementation,
- * `ScriptedNegotiationModel` — a fixed-sequence test double, by design (its
- * own module doc: "faithful by construction because the intent carries no
- * numbers"). A real, LLM-backed implementation is not this ticket's job —
- * that is downstream of TICKET-203 (constrained message composition, P1,
- * still TODO, being built by a sibling agent in a separate worktree this
- * ticket must not touch) and the buyer-facing surface still needs SOME
- * implementation to actually drive a negotiation end to end today.
+ * `ScriptedNegotiationModel` — a fixed-sequence test double, by design. A
+ * real, LLM-backed implementation is downstream work; the buyer-facing
+ * surface still needs SOME implementation to drive a negotiation end to end.
  *
- * `DeterministicMerchantModel` below is that minimal, honest stand-in. It is
- * NOT an attempt to pre-empt TICKET-203's constrained template work — it is
- * intentionally the simplest thing that satisfies `NegotiationModel` without
- * violating any invariant this system cares about:
+ * `DeterministicMerchantModel` below is that honest stand-in. It satisfies
+ * `NegotiationModel` without violating any invariant:
  *   - It only ever returns a `candidateId` that was in the `candidates` it
- *     was given (`pickBestCandidate` below never invents one).
+ *     was given (`pickConcessionCandidate` below never invents one).
  *   - `messageFrame` is a pure function of the chosen candidate's
  *     `moveType` — no free text, no numbers, nothing conversation-derived.
  *   - It never selects `terminalAction: "WALK_AWAY"` itself; the caller
  *     (`route.ts`) decides WALK_AWAY paths (round-limit, no-feasible-basket)
- *     before ever invoking a model at all, exactly as CONTRACTS.md §5.1
- *     requires ("no string produced by a model ever becomes a monetary
- *     amount") — this model doesn't get an opportunity to malfunction into
- *     one, because it's given nothing to malfunction with.
+ *     before ever invoking a model at all.
  *
- * Lives in `packages/trpc`, not `packages/agent` — the instruction for this
- * ticket is explicit that `packages/agent`'s files are not to be touched
- * while TICKET-203 is in flight there. `packages/trpc` already depends on
- * `@repo/agent` only for its published, frozen `NegotiationModel` interface
- * and `NegotiationRoundInput` type; nothing here reaches into `packages/
- * agent`'s internals.
+ * ============================================================================
+ * IT CONCEDES TOWARD THE BUYER — it does not upsell (ISSUE-012 sub-issue 12e)
+ * ============================================================================
+ * The original stand-in picked the highest-*contribution* candidate via
+ * `packages/policy`'s `selectCandidate` (PRD §6.6's merchant objective
+ * ordering). On any real cart that is almost always a self-funding
+ * `INCREASE_QUANTITY` bundle — i.e. the model answered "give me a discount"
+ * with "buy three instead of one", the identical offer every round, until
+ * the round cap. A Tier 2 rescue was never reached end to end through
+ * `propose`, and the negotiation never visibly moved.
+ *
+ * This model instead plays a merchant genuinely chasing a deal with a
+ * price-sensitive buyer: each round it offers the **lowest-total candidate
+ * the engine is exposing** (`pickConcessionCandidate`). While only Tier 1 is
+ * available that is a light structural concession; once a Tier 1 refusal has
+ * unlocked Tier 2 (RA-2) it becomes the plain discounted cart — a
+ * campaign-funded `PRICE_CONCESSION` — and the offer total drops round over
+ * round as the concession envelope widens, until the Tier 2 shortfall
+ * outgrows the per-deal cap and the engine walks away (PRD §18.2). Same
+ * lowest-total rule the demo harness's `DemoMerchantModel`
+ * (`packages/agent/demo`) uses; kept as a separate small function here rather
+ * than importing that demo code into the transport layer.
+ *
+ * Still B4-legal (CONTRACTS.md §2): it chooses among an already-generated,
+ * already-tiered, already-exposed set and never sees or forwards buyer text.
  */
 
 /**
- * Which candidate this stand-in offers, out of the set the caller is
- * exposing this round (already Tier-1-only-until-refusal gated —
- * `selectExposedCandidates`/`selectableCandidates`). Reuses
- * `packages/policy`'s own `selectCandidate` (TICKET-109, PRD §6.6's stated
- * lexicographic ordering: in-tolerance-band slow-movers first, then highest
- * contribution, then lowest campaign spend, then a content tiebreak) rather
- * than inventing a second, weaker ordering here — `Candidate` is a strict
- * superset of the `TieredCandidate` shape `selectCandidate` reads, so it
- * type-checks directly against the exposed `Candidate[]` this module is
- * handed. Throws on an empty array, matching `selectCandidate`'s own
- * contract — the caller only ever invokes a model once at least one
- * candidate is selectable this round.
+ * The candidate this stand-in offers, out of the set the caller is exposing
+ * this round (already Tier-1-only-until-refusal gated —
+ * `selectExposedCandidates` / `selectableCandidates`): the cheapest one, with
+ * a deterministic tiebreak on `candidateId` so the choice is reproducible.
+ * Throws on an empty array — the caller only invokes a model once at least
+ * one candidate is selectable this round.
  */
-export function pickBestCandidate(candidates: readonly Candidate[]): Candidate {
-  return selectCandidate(candidates) as Candidate;
+export function pickConcessionCandidate(candidates: readonly Candidate[]): Candidate {
+  if (candidates.length === 0) {
+    throw new Error("pickConcessionCandidate: no candidates were exposed for this round");
+  }
+  return [...candidates].sort(
+    (a, b) => a.totalMinor - b.totalMinor || a.candidateId.localeCompare(b.candidateId),
+  )[0]!;
 }
 
 /** One frame per move type — a deterministic tag, never free text. */
@@ -79,13 +87,14 @@ export function messageFrameForMoveType(moveType: CandidateMoveType): MessageFra
 }
 
 /**
- * The simplest thing satisfying `NegotiationModel` — see module doc. Never
- * reads `input.conversation` (this stand-in has no free-form-text handling
- * to do, unlike a real model) and never emits `terminalAction`.
+ * The stand-in merchant model — see module doc. Never reads
+ * `input.conversation` (nothing free-form-text to handle) and never emits
+ * `terminalAction`. Offers the cheapest exposed candidate each round, so the
+ * negotiation actually concedes toward a price-sensitive buyer.
  */
 export class DeterministicMerchantModel implements NegotiationModel {
   nextIntent(input: NegotiationRoundInput): NegotiationIntent {
-    const chosen = pickBestCandidate(input.candidates);
+    const chosen = pickConcessionCandidate(input.candidates);
     return { candidateId: chosen.candidateId, messageFrame: messageFrameForMoveType(chosen.moveType) };
   }
 }

@@ -8,6 +8,7 @@ import { closeTestDb, getTestDb, truncateAllTables } from "../testing/db";
 import { merchantPoliciesTable, negotiationSessionsTable, skuPoliciesTable } from "../schema";
 import { REFERENCE_CART, SEED_MERCHANT_ID, seedDatabase } from "../seed";
 import { seedSession } from "../seed-session";
+import { DEMO_CART, DEMO_MERCHANT_ID } from "../demo-scenario";
 
 /**
  * The dev helper `db:seed-session` (`packages/database/seed-session.ts`) — the
@@ -99,5 +100,39 @@ describe("db:seed-session helper", () => {
   it("fails with a pointer to db:seed when the merchant catalogue is absent", async () => {
     const db = await getTestDb();
     await expect(seedSession(db)).rejects.toThrow(/db:seed/);
+  });
+
+  describe("demo scenario", () => {
+    it("self-provisions the ₹700-cap demo merchant and points the session at it", async () => {
+      const db = await getTestDb();
+      // No `seedDatabase` call — the demo scenario provisions its own merchant.
+      const sessionId = await seedSession(db, "demo");
+
+      const [session] = await db
+        .select()
+        .from(negotiationSessionsTable)
+        .where(eq(negotiationSessionsTable.id, sessionId));
+      expect(session!.merchantId).toBe(DEMO_MERCHANT_ID);
+      expect(session!.state).toBe("AT_RISK");
+      expect(session!.originalBasket).toEqual(DEMO_CART);
+
+      const [policy] = await db
+        .select()
+        .from(merchantPoliciesTable)
+        .where(eq(merchantPoliciesTable.merchantId, DEMO_MERCHANT_ID));
+      expect(policy!.perDealCapMinor).toBe(70_000);
+    });
+
+    it("is idempotent: a second demo run upserts the merchant, does not duplicate its catalogue", async () => {
+      const db = await getTestDb();
+      await seedSession(db, "demo");
+      await seedSession(db, "demo");
+
+      const skus = await db
+        .select()
+        .from(skuPoliciesTable)
+        .where(eq(skuPoliciesTable.merchantId, DEMO_MERCHANT_ID));
+      expect(skus).toHaveLength(6);
+    });
   });
 });
