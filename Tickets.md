@@ -980,21 +980,27 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-506 — Minimal buyer surface
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-204, TICKET-303
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-204, TICKET-303
 
 **Objective.** A functional, obviously agent-oriented buyer view — **minimal by design, not unfinished.**
 
 **Scope.** Transcript, current offer, accept/decline, payment authorization handoff. No storefront.
 
 **Acceptance criteria.**
-- A human can complete the payment authorization step from here.
-- It reads as an agent console, not a half-built shop.
+- A human can complete the payment authorization step from here. ✅ `apps/web/app/buyer/[sessionId]` drives the public `negotiation.*` surface: `getSessionContext` renders the cart, `openNegotiation` → a message composer → `propose` returns an offer, `acceptOffer` returns the payment handle, and the accepted state hands off to Razorpay's own hosted checkout (`checkout.razorpay.com`, keyed by `NEXT_PUBLIC_RAZORPAY_KEY_ID`) with the handle's `railOrderId`/`amountMinor` — the buyer authorizes there, the app never charges. When the key is absent the handle (order id + amount + currency) is still shown in full.
+- It reads as an agent console, not a half-built shop. ✅ No storefront, no cart editing, no browsing — a cart summary, a role-labelled transcript with the raw `reasonCode` on every turn, an offer card, and the handoff. Amounts formatted to rupees only at the render boundary (`apps/web/lib/money.ts`).
 
-**Tests required.** Accept-to-handle flow works end to end.
+**Tests required.** Accept-to-handle flow works end to end. ✅ `packages/trpc/tests/buyer-surface.test.ts` (3 tests) drives the exact call sequence the screen drives — `getSessionContext → openNegotiation → propose → decline → propose → acceptOffer` — against a real Postgres (CONTRACTS.md §8 primary seam; `apps/web` has no runner and §8 bars a fourth seam), asserting each response carries what that step renders and that the handle is never capture-shaped, plus the unflagged-checkout refusal path.
 
-**Affected.** `apps/web`
+**Affected.** `apps/web` (+ `packages/trpc/tests/` for the required test, per the TICKET-501 precedent — no `packages/trpc` source changed)
 
 **Parallelization.** Independent.
+
+**Implementation notes (2026-09-06).**
+- No frozen contract touched. The buyer surface is a pure client of the existing `negotiationRouter`; no new procedure, no output-schema change.
+- `apps/web/next.config.js`: set `agentRules: false` — Next 16's `next dev` otherwise writes `AGENTS.md`/`CLAUDE.md` into `apps/web` on every run; this repo's agent instructions are the root `CLAUDE.md`.
+- `apps/web/env.js`: added optional client var `NEXT_PUBLIC_RAZORPAY_KEY_ID` (publishable `rzp_test_…` key). Optional by design — its absence only disables the in-page checkout, not the handoff information.
+- Local dev needs `NEXT_PUBLIC_API_URL` pointing at the API origin (same requirement as the TICKET-501 merchant page; see ISSUE-006).
 
 **References.** PRD §19; Settled by: Q17
 
