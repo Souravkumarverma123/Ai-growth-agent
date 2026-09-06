@@ -1040,16 +1040,18 @@ Good tests here assert **external behaviour**, never internal structure. "A Tier
 
 ### TICKET-601 — Invariant suite: economics
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 1
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 1
 
-**Scope and required assertions.**
-- An offer can never violate a SKU floor (property test over randomized catalogues).
-- Campaign spend cannot exceed the per-deal cap.
-- Campaign spend cannot exceed remaining campaign budget.
-- Holds are reserved, released, and committed correctly across all terminal paths.
-- Tier 2 cannot unlock before a Tier 1 refusal.
-- The 3% slow-moving band changes selection at 2% and not at 4%.
-- Candidate generation is deterministic across 100 runs.
+**Scope and required assertions.** All in `packages/policy/tests/invariants-economics.test.ts` (20 tests), which drives the whole engine pipeline — `generateCandidates → assignTiersAndFeasibility → selectCandidate → mintOffer` — over randomized catalogues/baskets/rounds/budgets and asserts each invariant as an emergent property of the composition, not just of one stage.
+- An offer can never violate a SKU floor (property test over randomized catalogues). ✅ 200 randomized trials: every generated candidate line and every minted offer line stays ≥ its SKU floor, cross-checked against `assertNoFloorBreach`; a separate sweep asserts non-negotiable SKUs are never discounted.
+- Campaign spend cannot exceed the per-deal cap. ✅ 200-trial sweep over every feasible Tier 2 candidate + a forced Tier-2-only selection that mints and asserts `campaignSpendMinor ≤ perDealCapMinor` + a 1-minor-unit-over-cap boundary case.
+- Campaign spend cannot exceed remaining campaign budget. ✅ same tests, `≤ availableCampaignBudgetMinor`; plus "spend == exact shortfall, no rounding, no buffer" over 120 trials.
+- Holds are reserved, released, and committed correctly across all terminal paths. ✅ asserted through the transition resolvers + frozen `TRANSITIONS`: reserve→`HOLD_RESERVED` (Tier 2 only), commit→`HOLD_COMMITTED` on `SETTLED` (Tier 2 only), every unwind path→`HOLD_RELEASED`, tier-1 resolvers throw. Found ISSUE-015 (no `HOLD_RELEASED` row for the `BUYER_ENDS_SESSION → DECLINED` path — TTL self-heal only); suite asserts today's frozen reading.
+- Tier 2 cannot unlock before a Tier 1 refusal. ✅ 200-trial sweep with `tier1Refused: false`: zero Tier 2 in `selectableCandidates`, selected + minted offer always Tier 1; a flip test; and `mintOffer` throws on a Tier 2 id while `tier1Refused` is false.
+- The 3% slow-moving band changes selection at 2% and not at 4%. ✅ 2%/3%/4%-behind cases through `selectCandidate`.
+- Candidate generation is deterministic across 100 runs. ✅ `generateCandidates` byte-identical ×100, deterministic pipeline stages byte-identical ×100, and selection independent of input array order (10 scenarios × 8 shuffles).
+
+**Note (2026-09-06):** the single-shot pipeline essentially never *selects* a Tier 2 candidate — a Tier 1 candidate (INCREASE_QUANTITY or a COMMITMENT_SWAP) is almost always present and always outranks a dilutive Tier 2 one (ISSUE-012 sub-issue 12e). Invariants 2/3 for the *selected/minted* Tier 2 case are covered by a deliberately Tier-2-only forced scenario instead. Hold-lifecycle concurrency safety (release-exactly-once under races) is `packages/database`/`packages/payments`' share (TICKET-108, TICKET-305, TICKET-602/604), not this pure suite's.
 
 **Affected.** `packages/policy`
 
