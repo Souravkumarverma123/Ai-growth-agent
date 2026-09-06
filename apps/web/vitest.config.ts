@@ -12,7 +12,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [tsconfigPaths(), react()],
   test: {
-    environment: "jsdom",
+    // happy-dom, not jsdom: jsdom@30 bundles undici@8, which calls a webidl
+    // global (`markAsUncloneable`) absent on the Node 20.x line CI pins —
+    // it fails to load before a single test runs. happy-dom has no undici
+    // dependency and covers everything this suite renders.
+    environment: "happy-dom",
     include: ["tests/**/*.test.{ts,tsx}"],
     setupFiles: ["./vitest.setup.ts"],
   },
