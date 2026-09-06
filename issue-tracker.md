@@ -69,6 +69,96 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-020 — the whole merchant tRPC surface is `publicProcedure` with `merchantId` as an input — any caller can read/write any merchant
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-503 (CodeAnt review of PR #44 flagged `getCampaignBudget`)
+Date: 2026-09-06
+Violates invariant: none listed in PRD §21 — but it is a real
+authorization gap on the merchant console surface.
+
+### Problem
+
+Every procedure in `packages/trpc/server/routes/merchant/route.ts`
+(`getPolicy`, `approvePolicy`, `setNegotiationEnabled`, and now
+`getCampaignBudget`) is a `publicProcedure` that takes `merchantId` as a
+plain input field. There is no authentication or authorization anywhere in
+the stack — `Context` is just `{ db }`, and `apps/web` hardcodes the single
+seed merchant id. So any unauthenticated caller who knows (or guesses) a
+merchant UUID can read that merchant's policy, floors, per-deal cap and full
+campaign-budget breakdown, and can approve policy changes or flip their kill
+switch.
+
+CodeAnt flagged this specifically on `getCampaignBudget` (PR #44), but it is
+not a TICKET-503 defect — `getCampaignBudget` follows the exact pattern the
+other three merchant procedures established in TICKET-501, and the frozen
+Phase-0 signature (TICKET-006) already fixed `{ merchantId: z.string() }` as
+its input. Fixing it for one procedure would be inconsistent and wouldn't
+close the hole.
+
+### Fix
+
+Out of scope for TICKET-503 and not a unilateral change: it needs an
+auth story (a `protectedProcedure` with a real session / API key in
+`Context`, and `merchantId` derived from the caller identity instead of
+taken as input) applied across the whole merchant router at once. That is a
+change to frozen router signatures (CONTRACTS.md §1/§11.2) and needs lead
+sign-off on the auth mechanism. The buyer-facing surface has the same shape
+and should be reviewed in the same pass.
+
+Acceptable for the MVP demo as-is (single seed merchant, no real merchant
+data), but must not ship to real merchants without this.
+
+### Related Ticket
+
+TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern)
+
+### Status History
+
+- 2026-09-06: OPEN — recorded from a CodeAnt review comment on PR #44.
+
+---
+
+## ISSUE-019 — `apps/web` merchant "watch" screens are copying the same poll-card chrome per ticket
+
+Status: OPEN
+Severity: LOW
+Found in: TICKET-503 (campaign budget countdown)
+Date: 2026-09-06
+Violates invariant: none — a UI-duplication judgement call.
+
+### Problem
+
+`apps/web/app/merchant/sessions/[sessionId]/merchant-event-stream.tsx`
+(TICKET-502) and `apps/web/app/merchant/budget/campaign-budget-countdown.tsx`
+(TICKET-503) now carry near-identical copies of the same poll-card shell: the
+`POLL_INTERVAL_MS = 2_000` constant, the `CardHeader` with the `RefreshCw` +
+`aria-live` "Live / Refreshing" status line, the `isError` `<p>` with
+`AlertCircle`, and the "Last checked … `toLocaleTimeString()`" footer. Each
+ticket was told to mirror TICKET-502, so two copies is defensible — but
+TICKET-504 (offer status / TTL) and TICKET-505 (audit trail) are both more
+`apps/web` "watch" screens and will make it four.
+
+### Fix
+
+Not done here — extracting a shared `<PollCard>` (or a `useMerchantPoll`
+hook) is its own small refactor and pulling it out mid-TICKET-503 would grow
+this PR past its ticket. Whoever picks up TICKET-504 or TICKET-505 should
+extract the shell first and retrofit 502/503, rather than adding a third
+copy. The pure shaping split (`lib/event-stream.ts`, `lib/campaign-budget.ts`)
+is already shared-by-pattern and is not the duplication in question.
+
+### Related Ticket
+
+TICKET-502, TICKET-503, TICKET-504, TICKET-505
+
+### Status History
+
+- 2026-09-06: OPEN — recorded when TICKET-503's second copy landed.
+
+---
+
 ## ISSUE-018 — `apps/web` gained a jsdom component-test runner; TICKET-506 had read CONTRACTS §8 as barring one
 
 Status: OPEN

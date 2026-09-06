@@ -4,53 +4,109 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { campaignHoldsTable, type SelectCampaignHold } from "../models/offer";
 import { merchantPoliciesTable } from "../models/merchant";
 
+export type CampaignBudgetBreakdown = {
+  totalMinor: number;
+  reservedMinor: number;
+  committedMinor: number;
+  /**
+   * `max(0, total − reserved − committed)` (PRD §6.5). Floored at zero: a
+   * merchant can approve a policy that lowers `campaignBudgetTotalMinor`
+   * below what is already reserved + committed, which would otherwise make
+   * this negative. "Available headroom" has no negative meaning — it is zero
+   * and the merchant is overcommitted — and the overcommitment stays fully
+   * visible because `total`, `reserved` and `committed` are all reported raw.
+   * (This also keeps the value inside `getCampaignBudget`'s frozen
+   * `nonnegative()` output schema.)
+   */
+  availableMinor: number;
+};
+
 /**
- * TICKET-204 — read-only campaign-budget snapshot, for tiering-time
- * feasibility checks (`assignTiersAndFeasibility`'s
- * `availableCampaignBudgetMinor` input, `packages/policy/generation/
- * tiering.ts`).
+ * The single source of what "outstanding" campaign budget means for a
+ * merchant, split by hold state:
  *
- * Deliberately NOT the row-locked, transactional read inside
- * `campaign-holds.ts`'s `reserveCampaignBudget` (TICKET-107/ISSUE-004) — this
- * is only a snapshot to decide which candidates *look* feasible before the
- * model picks one; the real, safe-under-concurrency check still happens at
- * mint time via `reserveCampaignBudget` itself, which every Tier 2 mint in
- * this ticket's `propose` procedure goes through before calling `mintOffer`.
- * A stale snapshot here can only make a Tier 2 candidate look feasible when
- * it (rarely) no longer is by mint time — `mintOffer`'s own
- * `CampaignBudgetReservationOutcome` handling (`{ reserved: false,
- * reasonCode: "CAMPAIGN_BUDGET_EXHAUSTED" }`) is exactly the documented,
- * expected outcome for that race, not a bug this snapshot needs to prevent.
+ * - `reservedMinor` — RESERVED holds that have not passed `expires_at`. An
+ *   expired-but-still-RESERVED hold is excluded: nothing sweeps an abandoned
+ *   hold to RELEASED yet, and `campaignHoldsTable.expiresAt`'s own doc ("An
+ *   abandoned offer returns its budget on expiry") is a hold-visible
+ *   invariant — its amount has already returned to `available`. This is the
+ *   same predicate `reserveCampaignBudget` (TICKET-107/ISSUE-004) uses for
+ *   its outstanding read.
+ * - `committedMinor` — COMMITTED holds, always. A permanent spend, never
+ *   time-limited.
  *
- * Mirrors `reserveCampaignBudget`'s own `available = total - outstanding`
- * arithmetic (RESERVED-and-unexpired, or COMMITTED) so the two never
- * disagree about what "outstanding" means.
+ * `reserved` and `committed` are never stored columns — the frozen schema
+ * (CONTRACTS.md §1) forbids adding one — so both are derived here by summing
+ * `campaign_holds.amount_minor` per state.
+ *
+ * Read-only snapshot, no row lock: a display / feasibility read, never the
+ * decision input. The safe-under-concurrency check still happens at mint time
+ * inside `reserveCampaignBudget`. The policy total and the hold sums are read
+ * in two statements, so a snapshot can briefly pair an old total with newer
+ * holds (or vice versa) — acceptable for a 2s-polled display, and its only
+ * harmful outcome (a negative `available` breaking the tRPC output schema) is
+ * removed by the zero-floor on `availableMinor` below.
+ *
+ * Returns `null` when the merchant has no policy row (mirrors
+ * `getMerchantPolicy`).
  */
-export async function getAvailableCampaignBudgetMinor(
+export async function getCampaignBudgetBreakdown(
   database: NodePgDatabase,
   merchantId: string,
-): Promise<number> {
+): Promise<CampaignBudgetBreakdown | null> {
   const [policy] = await database
     .select({ campaignBudgetTotalMinor: merchantPoliciesTable.campaignBudgetTotalMinor })
     .from(merchantPoliciesTable)
     .where(eq(merchantPoliciesTable.merchantId, merchantId));
 
   if (!policy) {
-    throw new Error(`getAvailableCampaignBudgetMinor: no merchant_policies row for merchant ${merchantId}`);
+    return null;
   }
 
-  const outstandingResult = await database.execute<{ outstanding_minor: string }>(sql`
-    SELECT COALESCE(SUM(amount_minor), 0) AS outstanding_minor
+  const breakdownResult = await database.execute<{
+    reserved_minor: string;
+    committed_minor: string;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(amount_minor) FILTER (WHERE state = 'RESERVED' AND expires_at > now()), 0) AS reserved_minor,
+      COALESCE(SUM(amount_minor) FILTER (WHERE state = 'COMMITTED'), 0) AS committed_minor
     FROM campaign_holds
     WHERE merchant_id = ${merchantId}
-      AND (
-        state = 'COMMITTED'
-        OR (state = 'RESERVED' AND expires_at > now())
-      )
   `);
 
-  const outstandingMinor = Number(outstandingResult.rows[0]?.outstanding_minor ?? 0);
-  return policy.campaignBudgetTotalMinor - outstandingMinor;
+  const row = breakdownResult.rows[0];
+  const reservedMinor = Number(row?.reserved_minor ?? 0);
+  const committedMinor = Number(row?.committed_minor ?? 0);
+  const totalMinor = policy.campaignBudgetTotalMinor;
+
+  return {
+    totalMinor,
+    reservedMinor,
+    committedMinor,
+    availableMinor: Math.max(0, totalMinor - reservedMinor - committedMinor),
+  };
+}
+
+/**
+ * TICKET-204 — `available` alone, for tiering-time feasibility checks
+ * (`assignTiersAndFeasibility`'s `availableCampaignBudgetMinor` input,
+ * `packages/policy/generation/tiering.ts`).
+ *
+ * A thin projection of `getCampaignBudgetBreakdown` so the "outstanding"
+ * predicate (RESERVED-and-unexpired, or COMMITTED) is defined in exactly one
+ * place and this can never drift from `reserveCampaignBudget` or from the
+ * merchant countdown (TICKET-503). Throws on a missing policy row — a
+ * tiering read for a merchant with no policy is a bug, not a not-found.
+ */
+export async function getAvailableCampaignBudgetMinor(
+  database: NodePgDatabase,
+  merchantId: string,
+): Promise<number> {
+  const breakdown = await getCampaignBudgetBreakdown(database, merchantId);
+  if (!breakdown) {
+    throw new Error(`getAvailableCampaignBudgetMinor: no merchant_policies row for merchant ${merchantId}`);
+  }
+  return breakdown.availableMinor;
 }
 
 /** One hold per offer (`campaignHoldsTable.offerId` is unique) — used by

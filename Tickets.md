@@ -925,20 +925,29 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-503 — Campaign budget countdown
 
-**Status:** TODO · **Priority:** P1 · **Dependencies:** TICKET-107
+**Status:** DONE · **Priority:** P1 · **Dependencies:** TICKET-107
 
 **Objective.** The visible number that makes "bounded" concrete.
 
 **Scope.** Total, reserved, committed, available. Updates as holds move.
 
 **Acceptance criteria.**
-- Reserved and available update visibly when a Tier 2 offer is minted and again when it expires.
+- Reserved and available update visibly when a Tier 2 offer is minted and again when it expires. ✅ `apps/web/app/merchant/budget` polls `merchant.getCampaignBudget` on a 2s `refetchInterval` (react-query, `refetchIntervalInBackground: false`; no SSE, matching TICKET-502). The card shows `available` as the headline figure over `total`, a committed/reserved/available stacked bar, and the three figures broken out. `CampaignBudgetPanel` (props-only) is split from the `MerchantCampaignBudget` polling container, and all shaping is in the pure `apps/web/lib/campaign-budget.ts` (`toCampaignBudgetView`) — same pattern as `event-stream.ts` / `EventStreamView` (ISSUE-018). Money stays in minor units through the shaping layer; `formatRupees` is called only at the JSX boundary (CONTRACTS §3).
 
-**Tests required.** Display matches engine state across a hold lifecycle.
+**Tests required.** Display matches engine state across a hold lifecycle. ✅ `apps/web/tests/campaign-budget.test.tsx` renders `CampaignBudgetPanel` across the snapshot sequence the criterion names — before mint → after a Tier 2 mint (reserved rises, available falls) → after expiry (reserved back to zero, available restored) → after capture (committed, not available) — and asserts the displayed rupee figures and stacked-bar segment widths match each snapshot, plus loading/error states and the pure `toCampaignBudgetView` shaping (segment order, fractions of total, zero-total guard, clamp on divergence). `packages/trpc/tests/campaign-budget.test.ts` (6 tests) proves the API half against a real Postgres (CONTRACTS §8 primary seam): `getCampaignBudget` tracks `total / reserved / committed / available` as the real engine (`reserveCampaignBudget` / `releaseCampaignHold` / `commitCampaignHold`, TICKET-107/108) moves a hold through reserve → release, reserve → commit (capture), reserve → TTL-elapse, and two concurrent holds; NOT_FOUND for a merchant with no policy row.
 
-**Affected.** `apps/web`
+**Affected.** `apps/web`, plus `packages/trpc` + `packages/database` for the `merchant.getCampaignBudget` body — the frozen Phase-0 stub (`packages/trpc/server/routes/merchant/route.ts`) is labelled "Implemented by TICKET-503" and the merchant router header assigns it here. Implementing a stubbed procedure body is explicitly allowed (CONTRACTS §1); the frozen output schema is unchanged. New `getCampaignBudgetBreakdown` in `packages/database/repositories/campaign-budget-snapshot.ts` derives the four figures from `campaign_holds` the same way `getAvailableCampaignBudgetMinor` / `reserveCampaignBudget` already derive "outstanding".
 
 **Parallelization.** Independent.
+
+**Implementation notes (2026-09-06).**
+- No frozen contract changed. `merchant.getCampaignBudget`'s input/output schemas are exactly as frozen in TICKET-006; only the stub body was filled in.
+- `available = total − reserved − committed` (PRD §6.5). `reserved` excludes a RESERVED hold past its `expires_at` — consistent with `reserveCampaignBudget` and `getAvailableCampaignBudgetMinor`, since nothing sweeps an abandoned hold to RELEASED yet and an expired hold has already returned its amount to `available` (the "Tier 2 offer … expires" half of the acceptance criterion). COMMITTED is a permanent spend and always counts.
+- New `getCampaignBudgetBreakdown` (`packages/database/repositories/campaign-budget-snapshot.ts`) is the single source of the four figures; the existing `getAvailableCampaignBudgetMinor` (TICKET-204) was re-expressed as a thin projection of it, so the RESERVED-and-unexpired / COMMITTED predicate lives in one place instead of two hand-written SQL blocks — behaviour identical, covered by the existing suites.
+- The countdown lives at its own route (`/merchant/budget`) using the same hardcoded demo merchant id as the TICKET-501 policy console — a fixed well-known id, no new `apps/web` → `@repo/database` import.
+- `notImplemented` helper removed from the merchant router — nothing used it after this.
+- **ISSUE-019** raised: the poll-card chrome (`RefreshCw` status line, error `<p>`, "Last checked" footer, `POLL_INTERVAL_MS`) is now copied between `merchant-event-stream.tsx` and `campaign-budget-countdown.tsx`. LOW — TICKET-504/505 should extract a shared `<PollCard>` before adding a third copy.
+- **CodeAnt review of PR #44** (2026-09-06): `availableMinor` is now `max(0, total − reserved − committed)` — a budget-lowering policy approval could otherwise make it negative and break the frozen `nonnegative()` output schema; the overcommitment stays visible via raw `total`/`reserved`/`committed`. The countdown card keeps the last good figures on screen when a background poll fails (surfacing the failure inline) instead of blanking to an error. **ISSUE-020** raised for the systemic `publicProcedure` + `merchantId`-as-input authorization gap across the whole merchant router (not a TICKET-503 defect — needs a lead-approved auth story).
 
 **References.** PRD §6.5; Settled by: Q10, Q22
 
