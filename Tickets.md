@@ -1129,13 +1129,59 @@ stopped, before order creation is ever reached. No production code changed.
 
 ### TICKET-604 — Invariant suite: payment and rail authority
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 3, Phase 4
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 3, Phase 4
 
-**Scope and required assertions.**
-- Razorpay state is authoritative — a rail-reported failure overwrites a local belief of success.
-- Payment divergence is handled safely: divergence event precedes correction, hold released once.
-- Autonomous payment cannot occur when disabled — the `true` branch throws and audits.
-- Audit events are produced correctly for every transition, and the chain verifies.
+**Scope and required assertions.** Split across the two `Affected` packages,
+same shape as TICKET-601/602: a pure `packages/policy` suite
+(`tests/invariants-payment-rail.test.ts`, 20 tests — resolvers + hash chain,
+no DB) and a real-Postgres `packages/payments` suite
+(`tests/invariants-payment-rail.test.ts`, 14 tests — `reconcileOrder` /
+`pollPendingOrders` against `getTestDb()` with a scripted `RailStateSource`,
+CONTRACTS.md §8 Seam 3).
+
+- Razorpay state is authoritative — a rail-reported failure overwrites a local
+  belief of success. ✅ Payments suite: an order the rail first reported
+  `AUTHORIZED` (optimistic local belief), then `FAILED`, lands the session on
+  `PAYMENT_FAILED` with `PAYMENT_FAILED` (never `PAYMENT_CAPTURED`) in the
+  ledger; a `localState` × rail-report sweep asserts the session always becomes
+  the rail's reading, both directions. Policy suite: `resolveRailReportTransition`
+  takes only the rail outcome — there is no parameter a local belief could
+  arrive through — and `SETTLED`/`PAYMENT_FAILED` have no outbound transition.
+- Payment divergence is handled safely: divergence event precedes correction,
+  hold released once. ✅ Payments suite: a captured-amount mismatch writes
+  `RAIL_STATE_DIVERGENCE` before `HOLD_RELEASED` (ledger sequence), carries both
+  amounts on the divergence event, releases the Tier 2 hold exactly once across
+  repeated reconciliation and when the hold was already released out-of-band,
+  and one diverging order does not block a healthy order in the same poll batch.
+  Policy suite: the same ordering over a hash-linked timeline built from the
+  resolvers.
+- Autonomous payment cannot occur when disabled — the `true` branch fails
+  closed and audits. ✅ Asserted purely in the policy suite:
+  `resolvePaymentInitiationTransition(true)` is a self-loop on `ACCEPTED` with
+  `AUTONOMOUS_PAYMENT_NOT_AUTHORIZED` (never advances toward payment), `false`
+  is the only row reaching `AWAITING_PAYMENT`, and the refusal event
+  hash-chains like any other. The end-to-end throw + audit through `acceptOffer`
+  is the ISSUE-013 regression in `packages/trpc/tests/negotiation-route.test.ts`
+  (`packages/payments` has no autonomous-payment code to drive, so the payments
+  suite does not re-exercise it — see its module doc).
+- Audit events are produced correctly for every transition, and the chain
+  verifies. ✅ Payments suite: after a real capture / divergence reconcile, the
+  chain fetched back from Postgres (`getAuditEventsForSession` →
+  `verifyChain`) is valid from genesis, a non-terminal poll adds no event, and
+  tampering with a stored payment event breaks verification exactly there.
+  Policy suite: capture / failure / divergence timelines each verify end to
+  end, one event per transition, every reason code in the closed enum.
+
+**Note (2026-09-06).** No production code changed — two test files only. Tier 2
+is reached the same way TICKET-304/305/602 reached it (seed the session at
+`AWAITING_PAYMENT` with an accepted Tier 2 offer + reserved hold and drive
+`reconcileOrder`), sidestepping ISSUE-012 sub-issues 12b/12e, which are about
+minting a Tier 2 offer through `createOrder` / `propose` — not relevant to the
+reconciliation path this ticket tests. `packages/payments` already carries
+`fileParallelism: false` (ISSUE-014); this is its fourth real-DB file.
+`packages/policy/tests/` is still outside `check-types` (ISSUE-016) — the new
+policy suite was hand-verified clean with a temporary `tests/` include (only
+ISSUE-016's three known `contribution.test.ts` errors surfaced).
 
 **Affected.** `packages/payments`, `packages/policy`
 
