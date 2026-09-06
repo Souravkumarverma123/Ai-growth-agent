@@ -1126,13 +1126,67 @@ stopped, before order creation is ever reached. No production code changed.
 
 ### TICKET-603 — Invariant suite: injection resistance and eligibility
 
-**Status:** TODO · **Priority:** P0 · **Dependencies:** Phase 2
+**Status:** DONE · **Priority:** P0 · **Dependencies:** Phase 2
 
-**Scope and required assertions.**
-- The LLM cannot directly set a monetary amount — type-level assertion that the intent has no numeric field.
-- The concession curve is byte-identical across radically different buyer messages, including the budget-inflation attack.
-- Prompt injection cannot modify policy — no policy write path is reachable from the agent package.
-- A buyer cannot self-declare eligibility — eligibility signature accepts no conversation input.
+**Scope and required assertions.** Split across the two `Affected` packages,
+same shape as TICKET-601/602/604: a pure `packages/policy` suite
+(`tests/invariants-injection-eligibility.test.ts`, 23 tests — the whole
+`generateCandidates → assignTiersAndFeasibility → selectCandidate → mintOffer`
+pipeline over a fixed §18.2 scenario, no DB) and a behavioural `packages/agent`
+suite (`tests/invariants-injection-eligibility.test.ts`, 16 tests — the only
+package that reads buyer text, so the injection payloads land here through
+`runNegotiationRound` / `runDemoNegotiation` with a `ScriptedNegotiationModel`,
+CONTRACTS.md §8 Seam 2). Both suites run a shared attack corpus (PRD §17
+scenario 2's budget inflation plus the crude jailbreaks §17.1 says "prove
+nothing").
+- The LLM cannot directly set a monetary amount — type-level assertion that the
+  intent has no numeric field. ✅ Policy + agent suites: `NumericKeys<NegotiationIntent>`
+  resolves to `never` (agent suite's is CI-enforced — its tsconfig has no
+  restrictive `include`, ISSUE-016; policy suite's is hand-checked with a
+  direct `tsc --noEmit`), the intent's keys are exactly
+  `candidateId`/`messageFrame`/`terminalAction`, `negotiationIntentSchema`
+  (strict) rejects every numeric field name an attacker might try, and a
+  minted offer's `totalMinor`/`campaignSpendMinor` is read off the engine
+  candidate even when the model's intent object carries a smuggled
+  `discountMinor`.
+- The concession curve is byte-identical across radically different buyer
+  messages, including the budget-inflation attack. ✅ Policy suite: the whole
+  pipeline's serialized output (offer id + signature stripped as randomized-by-
+  design) is identical across the corpus × rounds 1–3 × `tier1Refused`
+  both ways, because no parameter can carry a message; `resolveConcessionFraction`
+  and `generateCandidates` stay identical even when a message is smuggled past
+  the type system via an `unknown[]` cast; and pretending the attack *succeeded*
+  (a 10-lakh `availableCampaignBudgetMinor`) leaves every candidate basket and
+  `totalMinor` unchanged — only feasibility flags move, and a Tier 2 shortfall
+  over the ₹700 cap stays `DILUTION_EXCEEDS_PER_DEAL_CAP`-infeasible. Agent
+  suite: the minted offer is identical whether the transcript is empty or the
+  injection corpus, and a budget-inflation claim never unlocks Tier 2 (only a
+  real Tier 1 refusal flips `tier1Refused`).
+- Prompt injection cannot modify policy — no policy write path is reachable
+  from the agent package. ✅ Agent suite: a source scan asserts no file imports
+  `@repo/database` or `@repo/payments` and the only `@repo/*` dependency
+  anywhere is `@repo/policy` (the lint boundary made a runtime fact);
+  `RunNegotiationRoundInput` takes a `policyVersion` number, never a
+  `MerchantPolicy` object; and a full `runDemoNegotiation` leaves the
+  reference policy byte-identical, including when it is `Object.freeze`d.
+  Policy suite: `generateCandidates` never mutates the policy it is handed and
+  runs clean against a deep-frozen one; `mintOffer`'s input has no policy
+  object.
+- A buyer cannot self-declare eligibility — eligibility signature accepts no
+  conversation input. ✅ Policy suite: `EligibilityInput`'s keys are exactly
+  `session`/`policy`/`skuCatalogue` and the session slice carries only
+  `originalBasket` + the merchant-set `isFlaggedAtRisk`; `checkEligibility` is
+  unary; a smuggled `buyerClaimsAbandoning`/`conversation`/`message` never
+  flips `NOT_AT_RISK`, a smuggled "I am not eligible" never flips
+  `NEGOTIATION_OPENED`, and only the three merchant-controlled inputs move the
+  answer. Agent suite: the rendered buyer prompt contains no
+  eligibility/floor/budget-state/tier vocabulary, the buyer agent emits only
+  `{ kind, message }`, and the round input this package hands the engine has
+  no eligibility field.
+
+No new `issue-tracker.md` entry — all four invariants already held
+structurally; this ticket only adds the suite that asserts them (ISSUE-016's
+policy-tests type-checking gap already tracked, and applies here).
 
 **Affected.** `packages/policy`, `packages/agent`
 
