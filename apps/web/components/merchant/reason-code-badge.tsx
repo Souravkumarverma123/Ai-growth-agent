@@ -10,7 +10,12 @@ import { Badge } from "~/components/ui/badge";
  * `reasonTone`); the code itself is always shown in full.
  */
 
-const TONE_CLASS: Record<ReasonTone, string> = {
+/**
+ * Tone → badge class. Shared so any merchant screen that shows a tone-weighted
+ * pill (the reason code here, the offer lifecycle status on TICKET-504's
+ * card) renders the four tones identically.
+ */
+export const REASON_TONE_CLASS: Record<ReasonTone, string> = {
   positive: "border-transparent bg-emerald-600 text-white dark:bg-emerald-500/80",
   negative: "border-transparent bg-destructive text-white dark:bg-destructive/70",
   warning: "border-transparent bg-amber-500 text-white dark:bg-amber-500/80",
@@ -27,7 +32,7 @@ export function ReasonCodeBadge({
   className?: string;
 }) {
   return (
-    <Badge className={cn("font-mono text-[11px] tracking-tight", TONE_CLASS[tone], className)}>
+    <Badge className={cn("font-mono text-[11px] tracking-tight", REASON_TONE_CLASS[tone], className)}>
       {code}
     </Badge>
   );

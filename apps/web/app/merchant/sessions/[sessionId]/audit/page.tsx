@@ -28,12 +28,18 @@ export default async function MerchantAuditTrailPage({
             this negotiation — reason codes, payloads, chain verification. Nothing here changes the
             negotiation.
           </p>
-          <p className="text-muted-foreground mt-2 text-sm">
+          <p className="text-muted-foreground mt-2 flex gap-3 text-sm">
             <Link
               href={`/merchant/sessions/${sessionId}`}
               className="underline underline-offset-2"
             >
               ← Live event stream
+            </Link>
+            <Link
+              href={`/merchant/sessions/${sessionId}/offers`}
+              className="underline underline-offset-2"
+            >
+              ← Offer status
             </Link>
           </p>
         </div>

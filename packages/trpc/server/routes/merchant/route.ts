@@ -1,11 +1,13 @@
 import { TRPCError } from "@trpc/server";
 
 import { getCampaignBudgetBreakdown } from "@repo/database/repositories/campaign-budget-snapshot";
+import { getOffersForSession } from "@repo/database/repositories/offers";
 import {
   approveMerchantPolicy,
   getMerchantPolicy,
   setNegotiationEnabled as setNegotiationEnabledRepo,
 } from "@repo/database/repositories/merchant-policies";
+import { offerStatusSchema } from "@repo/policy/contracts";
 
 import { z } from "../../schema";
 import { publicProcedure, router } from "../../trpc";
@@ -26,6 +28,32 @@ const getPath = generatePath("/merchant");
 const commitmentValueSchema = z.object({
   commitmentType: z.enum(["PREPAID", "NON_RETURNABLE", "EXTENDED_DELIVERY_WINDOW"]),
   valueMinor: z.number().int().nonnegative(),
+});
+
+/**
+ * TICKET-504 — one minted offer, as the merchant's watch screen sees it.
+ * Unlike the buyer-facing `publicOfferSchema` this may carry `tier` and
+ * `campaignSpendMinor` — merchant-side figures (CONTRACTS.md §9 governs only
+ * the buyer surface, and `audit.getSessionLedger` already exposes the same
+ * per-deal shortfall). Money stays in minor units; the web layer formats.
+ * Timestamps are ISO-8601 strings — the client parses `expiresAt` and counts
+ * the TTL down from it.
+ */
+const sessionOfferViewSchema = z.object({
+  offerId: z.string(),
+  roundIndex: z.number().int().nonnegative(),
+  /** Derived arithmetically by the engine, never asserted by a caller (PRD §10). */
+  tier: z.number().int().min(1).max(2),
+  /** Best-effort read-model column; authoritative lifecycle is expiresAt/consumedAt. */
+  status: offerStatusSchema,
+  totalMinor: z.number().int().nonnegative(),
+  /** Exact contribution shortfall for this deal. Zero for Tier 1. */
+  campaignSpendMinor: z.number().int().nonnegative(),
+  currency: z.string(),
+  reasonCode: z.string(),
+  createdAt: z.string().nullable(),
+  expiresAt: z.string(),
+  consumedAt: z.string().nullable(),
 });
 
 const merchantPolicyViewSchema = z.object({
@@ -147,5 +175,36 @@ export const merchantRouter = router({
         });
       }
       return breakdown;
+    }),
+
+  /**
+   * TICKET-504 — "Show the offer perishing." Every offer minted for a
+   * session, newest round first, with the fields the merchant's watch card
+   * needs: status, TTL (`expiresAt`), tier, and campaign spend. Read-only —
+   * this is the merchant's own session data, the same seam the audit trail
+   * (`audit.getSessionLedger`) reads. An unknown session returns an empty
+   * list, matching the audit route rather than throwing.
+   */
+  getSessionOffers: publicProcedure
+    .meta({ openapi: { method: "GET", path: getPath("/session/{sessionId}/offers"), tags: TAGS } })
+    .input(z.object({ sessionId: z.string() }))
+    .output(z.object({ offers: z.array(sessionOfferViewSchema) }))
+    .query(async ({ input, ctx }) => {
+      const offers = await getOffersForSession(ctx.db, input.sessionId);
+      return {
+        offers: offers.map((offer) => ({
+          offerId: offer.id,
+          roundIndex: offer.roundIndex,
+          tier: offer.tier,
+          status: offer.status,
+          totalMinor: offer.totalMinor,
+          campaignSpendMinor: offer.campaignSpendMinor,
+          currency: offer.currency,
+          reasonCode: offer.reasonCode,
+          createdAt: offer.createdAt ? offer.createdAt.toISOString() : null,
+          expiresAt: offer.expiresAt.toISOString(),
+          consumedAt: offer.consumedAt ? offer.consumedAt.toISOString() : null,
+        })),
+      };
     }),
 });

@@ -955,19 +955,70 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 ### TICKET-504 — Offer status and TTL display
 
-**Status:** TODO · **Priority:** P2 · **Dependencies:** TICKET-111
+**Status:** DONE · **Priority:** P2 · **Dependencies:** TICKET-111
 
 **Objective.** Show the offer perishing.
 
 **Scope.** Status, remaining TTL, tier, campaign spend.
 
-**Acceptance criteria.** TTL counts down and the offer visibly expires.
+**Acceptance criteria.** TTL counts down and the offer visibly expires. ✅
+`apps/web/app/merchant/sessions/[sessionId]/offers` polls
+`merchant.getSessionOffers` on a 2s `refetchInterval` (react-query,
+`refetchIntervalInBackground: false`, same pattern as TICKET-502/503) and
+runs a local 1s clock so the TTL moves smoothly between polls and keeps
+running after polling stops. The card leads with the current offer — status
+badge, `Tier {n}`, offer total, a `m:ss` countdown over an emptying TTL bar,
+campaign spend (Tier 2 only, `—` for Tier 1), the raw mint `reasonCode` via
+the shared `<ReasonCodeBadge>`, and expiry time — with earlier rounds listed
+compact below. Built on the shared `<PollCard>` / `<PollError>` /
+`<PollLastChecked>` shell (ISSUE-019), not a fourth copy. All shaping is in
+the pure `apps/web/lib/offer-status.ts` (`toOfferStatusView(offers, nowMs)`);
+money stays in minor units through it and `formatRupees` is called only at
+the JSX boundary (CONTRACTS §3).
 
-**Tests required.** Expiry reflected in the UI state.
+**Tests required.** Expiry reflected in the UI state. ✅
+`apps/web/tests/offer-status.test.tsx` (14 tests) renders `OfferStatusPanel`
+and re-renders it with `now` advanced past `expiresAt` — the row flips
+`live → expired`, the countdown lands on `0:00`, and the TTL bar collapses to
+`0.00%` — plus Tier 1 vs Tier 2 campaign-spend display, verbatim reason
+code, the accepted / declined lifecycles, newest-round ordering, earlier-
+offer list, and the loading / empty / keep-last-good-on-error states, and
+pure `toOfferStatusView` unit cases. `packages/trpc/tests/session-offers.test.ts`
+(5 tests) proves the API half against a real Postgres (CONTRACTS §8 primary
+seam): `merchant.getSessionOffers` returns every offer for a session with its
+tier / status / `campaignSpendMinor` / `expiresAt` / `consumedAt`, newest
+round first, empty list for an unknown session, and reflects a consumed offer
+after `acceptOffer`.
 
-**Affected.** `apps/web`
+**Affected.** `apps/web`, plus `packages/trpc` + `packages/database` for the
+new read-only `merchant.getSessionOffers` procedure and its
+`getOffersForSession` repository read — no frozen contract touched (a new
+procedure is allowed, CONTRACTS §1; no existing signature or output schema
+changed).
 
 **Parallelization.** Independent. **Drop first if behind.**
+
+**Implementation notes (2026-09-06).**
+- No frozen contract changed. `merchant.getSessionOffers` is a brand-new
+  read-only procedure, not an edit to a frozen signature. Its output may
+  carry `tier` and `campaignSpendMinor` because this is the merchant's own
+  session data — CONTRACTS §9 governs only the buyer surface, and
+  `audit.getSessionLedger` already serializes the same per-deal shortfall.
+- `status` is passed through from the frozen best-effort `offers.status`
+  read-model column; the pure `toOfferStatusView` derives the displayed
+  lifecycle from `consumedAt` (authoritative single-use) and `expiresAt`
+  (authoritative TTL) first, falling back to `status` only for the
+  ACCEPTED / DECLINED distinction those two cannot make alone.
+- `getOffersForSession` (`packages/database/repositories/offers.ts`) uses the
+  Drizzle query builder, not the raw `.execute()` path that the rest of that
+  module documents at length — the query builder returns real `Date` objects,
+  so no `toDate` UTC normalization is needed.
+- Follows ISSUE-020's pattern: `getSessionOffers` is a `publicProcedure`
+  keyed by a client-supplied `sessionId` (same as the audit router), so
+  TICKET-606 converts it in the same pass as the rest of the merchant/audit
+  surface. No one-off auth check invented here.
+- An unknown `sessionId` returns `{ offers: [] }` rather than throwing,
+  matching `audit.getSessionLedger`.
 
 **References.** PRD §10; Settled by: Q13
 
