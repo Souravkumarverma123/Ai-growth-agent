@@ -1,24 +1,29 @@
 # NEXT — Ticket Solve Order
 
 The live, ordered queue of what's left. Generated from `Tickets.md`'s
-statuses/dependencies on 2026-09-06 (re-derived after TICKET-505 closed) —
-**re-derive this whenever a ticket flips to `DONE` or a new one is added**,
-don't hand-edit around a stale ordering. Full acceptance criteria live in
-`Tickets.md`; this file only answers "what's next and why."
+statuses/dependencies on 2026-09-06 (re-derived after TICKET-505 closed and
+TICKET-606 was added) — **re-derive this whenever a ticket flips to `DONE` or
+a new one is added**, don't hand-edit around a stale ordering. Full
+acceptance criteria live in `Tickets.md`; this file only answers "what's next
+and why."
 
 **Ordering rule:** dependency-ready first, then priority (P0 before P1 before
 P2), with the payment control-path and invariant suites ahead of `apps/web`
 UI polish — per `Tickets.md`'s own stated philosophy ("depth of the core
 invariant beats feature count").
 
-44 of 46 tickets are `DONE`. 2 remain.
+44 of 47 tickets are `DONE`. 3 remain — 2 ready, 1 blocked.
 
 ## Solve in this order
 
 1. **[TICKET-504](Tickets.md#ticket-504--offer-status-and-ttl-display)** — Offer status and TTL display · P2 · ready now · drop first if time runs out
 2. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
 
-Both remaining tickets are `apps/web` UI work (TICKET-508 also touches
+**Blocked, not in the queue:**
+
+- **[TICKET-606](Tickets.md#ticket-606--trpc-authentication-and-per-tenant-authorization)** — tRPC auth + per-tenant authorization · P1 · `BLOCKED` on the auth-mechanism decision (needs a settled `OQ` + lead sign-off; it changes frozen router signatures). Post-demo work — the auth gap (ISSUE-020) is an explicit MVP cut for the single-seed-merchant demo. Do not start it without the decision.
+
+The 2 ready tickets are `apps/web` UI work (TICKET-508 also touches
 `packages/trpc`).
 
 ## Parallelizable right now
@@ -84,3 +89,8 @@ card should use them, not a fourth hand-rolled copy.
   `NEEDS_SPEC_DECISION` — a money-formatting boundary, and stale-policy-
   version reads mid-negotiation. Flag them rather than silently deciding
   either while touching nearby code.
+- **ISSUE-020 → TICKET-606**: the merchant and audit tRPC routers are
+  unauthenticated `publicProcedure`s keyed by a client-supplied id — any
+  caller can read/write any tenant. Explicit MVP cut for the demo. If you add
+  a new merchant/audit procedure, follow the existing pattern (don't invent a
+  one-off auth check) so TICKET-606 can convert them all in one pass.

@@ -13,7 +13,7 @@ Priorities: **P0** (invariant-critical, cannot ship without) · **P1** (demo-cri
 
 | | |
 | --- | --- |
-| Total tickets | 46 |
+| Total tickets | 47 (46 original + TICKET-606, added post-demo from ISSUE-020) |
 | Estimated agent-hours | ~48.5 |
 | Wall clock available | ~32 h |
 | Required parallelism | ~1.5× sustained, i.e. 3 agents with one reviewer |
@@ -1297,6 +1297,38 @@ ISSUE-016's three known `contribution.test.ts` errors surfaced).
 **Affected.** eslint config, CI
 
 **References.** PRD §4 boundary rules; Settled by: Q6, Q26
+
+---
+
+### TICKET-606 — tRPC authentication and per-tenant authorization
+
+**Status:** BLOCKED · **Priority:** P1 · **Dependencies:** TICKET-006, TICKET-404
+
+**Blocked on:** a decision on the auth mechanism (browser session vs API key vs both) and on identity shape in `Context`. This is a change to frozen Phase-0 router signatures (`CONTRACTS.md §1`, §11.2), so it needs lead sign-off before implementation — record the decision as a settled `OQ` first. Not demo-blocking: acceptable as-is for the single-seed-merchant demo (`issue-tracker.md` ISSUE-020).
+
+**Objective.** Close the authorization gap: today every merchant and audit procedure is a `publicProcedure` keyed by an id taken as plain input, so any caller who knows or guesses a `merchantId` / `sessionId` can read that tenant's policy, floors, per-deal cap, campaign-budget breakdown, and full negotiation ledger (reason codes, model explanations, offer ids, campaign spend), and can approve policy changes or flip the kill switch.
+
+**Scope.**
+- A real caller identity in `Context` (today it is just `{ db }`) — mechanism TBD by the blocking decision.
+- `protectedProcedure` (authenticated) applied across the merchant router (`getPolicy`, `approvePolicy`, `setNegotiationEnabled`, `getCampaignBudget`), the audit router (`getSessionLedger`, `verifyChain`), and the buyer-facing `negotiation.*` surface in the same pass — they share the same shape and must not drift.
+- `merchantId` derived from the caller identity, not accepted as an input field. Session-scoped reads (`audit.*`) check the session belongs to the caller's merchant (or a buyer principal bound to that session).
+- `apps/web` stops hardcoding `SEED_MERCHANT_ID` / passing ids as query input and reads them from the authenticated session.
+- Decide and document the buyer's principal: how a buyer is bound to one `sessionId` without a full account (signed session token from `openNegotiation`, most likely).
+- Keep the OpenAPI/Scalar surface honest — the public reference should show auth requirements, and the "judges can negotiate against the live endpoint" demo promise (PRD §18.1) still has to work, so the buyer path needs an unauthenticated-but-session-bound entry.
+
+**Acceptance criteria.**
+- No `publicProcedure` remains on the merchant or audit routers; the buyer surface is session-bound.
+- A caller authenticated as merchant A cannot read or mutate merchant B's policy, budget, or any of B's sessions — returns a not-found / forbidden, and the attempt is not a silent empty success.
+- `merchantId` is no longer a client-supplied field on any merchant procedure.
+- The frozen-signature change is recorded as an approved `CONTRACTS.md` amendment with the settled decision referenced.
+
+**Tests required.** Cross-tenant denial: merchant A's caller is refused merchant B's policy read, budget read, policy approval, kill-switch write, and B's `audit.getSessionLedger` / `verifyChain`. Buyer principal can reach only its own session. tRPC-caller-against-real-Postgres seam (`CONTRACTS.md §8`), no new seam.
+
+**Affected.** `packages/trpc`, `packages/database` (identity/session lookup), `apps/api` (auth middleware, OpenAPI), `apps/web` (session wiring), `CONTRACTS.md` (frozen-signature amendment)
+
+**Parallelization.** Independent once unblocked, but touches every router surface — should be one focused change by one agent, not split.
+
+**References.** PRD §18.1 (public endpoint promise), §9 (payment boundary — buyer vs merchant authority); `issue-tracker.md` ISSUE-020; `CONTRACTS.md §1`, §11.2
 
 ---
 

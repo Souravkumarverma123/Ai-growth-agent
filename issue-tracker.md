@@ -187,10 +187,14 @@ spend. Same frozen-signature auth pass, same deferral.
 Acceptable for the MVP demo as-is (single seed merchant, no real merchant
 data), but must not ship to real merchants without this.
 
+**Now tracked as TICKET-606** (`Tickets.md`, Phase 6) — `BLOCKED` on the
+auth-mechanism decision. This issue stays `OPEN` until that ticket closes.
+
 ### Related Ticket
 
 TICKET-503 (found), TICKET-501 / TICKET-006 (established the pattern),
-TICKET-502 / TICKET-505 (audit router, same shape — CodeAnt flagged on PR #45)
+TICKET-502 / TICKET-505 (audit router, same shape — CodeAnt flagged on PR #45),
+TICKET-606 (the fix)
 
 ### Status History
 
@@ -198,6 +202,9 @@ TICKET-502 / TICKET-505 (audit router, same shape — CodeAnt flagged on PR #45)
 - 2026-09-06: still OPEN — CodeAnt flagged the same class on PR #45's audit
   route; folded the audit router into this issue rather than opening a
   duplicate.
+- 2026-09-06: still OPEN — promoted to TICKET-606 (BLOCKED) so the
+  cross-cutting auth pass is scheduled work, not just a tracker note. Left
+  as an explicit MVP cut for the demo.
 
 ---
 
