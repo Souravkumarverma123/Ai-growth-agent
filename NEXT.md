@@ -1,7 +1,7 @@
 # NEXT — Ticket Solve Order
 
 The live, ordered queue of what's left. Generated from `Tickets.md`'s
-statuses/dependencies on 2026-09-06 (re-derived after TICKET-504 closed) —
+statuses/dependencies on 2026-09-06 (re-derived after TICKET-508 closed) —
 **re-derive this whenever a ticket flips to `DONE` or a new one is added**,
 don't hand-edit around a stale ordering. Full acceptance criteria live in
 `Tickets.md`; this file only answers "what's next and why."
@@ -11,22 +11,26 @@ P2), with the payment control-path and invariant suites ahead of `apps/web`
 UI polish — per `Tickets.md`'s own stated philosophy ("depth of the core
 invariant beats feature count").
 
-45 of 47 tickets are `DONE`. 2 remain — 1 ready, 1 blocked.
+46 of 47 tickets are `DONE`. 1 remains — blocked.
 
 ## Solve in this order
 
-1. **[TICKET-508](Tickets.md#ticket-508--walk-away-policy-change-card)** — Walk-away policy-change card · P2 · ready now · drop first if time runs out
+Nothing is ready. Every unblocked ticket is `DONE`.
 
 **Blocked, not in the queue:**
 
 - **[TICKET-606](Tickets.md#ticket-606--trpc-authentication-and-per-tenant-authorization)** — tRPC auth + per-tenant authorization · P1 · `BLOCKED` on the auth-mechanism decision (needs a settled `OQ` + lead sign-off; it changes frozen router signatures). Post-demo work — the auth gap (ISSUE-020) is an explicit MVP cut for the single-seed-merchant demo. Do not start it without the decision.
 
-The one ready ticket (TICKET-508) is `apps/web` UI work that also touches
-`packages/trpc`.
+TICKET-606 is the only ticket left and it is blocked on a spec decision —
+there is no feature work to pick up. What remains is post-demo: the auth
+conversion (needs the auth-mechanism decision) and the open `issue-tracker.md`
+items (ISSUE-022 the walk-away reason-code split, ISSUE-021 the `feasible`
+count, ISSUE-017 the §18.2 cap/curve inconsistency, …), each its own future
+ticket.
 
 ## Parallelizable right now
 
-Only TICKET-508 is ready; nothing to parallelize.
+Nothing — the queue is empty and TICKET-606 is blocked.
 
 `apps/web` has a `vitest` + `happy-dom` component-test runner (added by
 TICKET-502; see ISSUE-018). Use it for a required "display matches state"

@@ -56,6 +56,7 @@ import { generatePath } from "../../utils/path-generator";
 import { loadMerchantNegotiationContext } from "./merchant-context";
 import { assignCandidateIdentity, DeterministicMerchantModel } from "./merchant-model";
 import { toPublicBasketLines, toPublicOffer } from "./public-mappers";
+import { summarizeWalkAwayEconomics } from "./walk-away-economics";
 
 /**
  * FROZEN CONTRACT — PRD.md §18, CONTRACTS.md §9. Signatures only; bodies were
@@ -417,11 +418,32 @@ export const negotiationRouter = router({
         });
 
         const generatedTransition = resolveCandidatesGeneratedTransition(tierResult);
+        // TICKET-508 / PRD §20: when this round produces no selectable basket
+        // the CANDIDATES_GENERATED event IS the walk-away event
+        // (`to: WALKED_AWAY`). Record the round's economic facts on it — the
+        // per-deal cap, the live campaign budget, and the smallest rescue
+        // shortfall the engine saw — so the merchant console's walk-away card
+        // can show what a different cap would have closed without ever
+        // hardcoding a figure. Nothing extra is written on the feasible path.
+        //
+        // `availableCampaignBudgetMinor` here is the SAME snapshot the tiering
+        // decision above was made against — deliberately, so the card reports
+        // the budget the engine actually saw when it walked away, not a fresher
+        // (and now inconsistent) re-read. It is an informational figure, never
+        // a control-path value.
+        const walkAwayEconomics = tierResult.feasible
+          ? {}
+          : summarizeWalkAwayEconomics({
+              candidates: generation.candidates,
+              tier1Refused: session.tier1Refused,
+              perDealCapMinor: policy.perDealCapMinor,
+              availableCampaignBudgetMinor,
+            });
         await appendAuditEvent(
           tx,
           auditParamsFromTransition(generatedTransition, {
             sessionId: session.id,
-            payload: { ...generation.counts },
+            payload: { ...generation.counts, ...walkAwayEconomics },
             policyVersion: session.policyVersion,
           }),
         );
@@ -555,7 +577,16 @@ export const negotiationRouter = router({
             tx,
             auditParamsFromTransition(transition, {
               sessionId: session.id,
-              payload: { candidateId: chosen.candidateId },
+              // TICKET-508 / PRD §20: the shortfall this rejected mint needed,
+              // next to both limits it was checked against — the walk-away
+              // card reads them back. `roundResult.reasonCode` (authoritative)
+              // says which limit actually bound.
+              payload: {
+                candidateId: chosen.candidateId,
+                requiredCampaignSpendMinor: chosen.requiredCampaignSpendMinor,
+                perDealCapMinor: policy.perDealCapMinor,
+                availableCampaignBudgetMinor,
+              },
               policyVersion: session.policyVersion,
             }),
           );

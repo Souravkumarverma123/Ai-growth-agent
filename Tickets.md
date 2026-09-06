@@ -1100,16 +1100,23 @@ changed).
 
 ### TICKET-508 — Walk-away policy-change card
 
-**Status:** TODO · **Priority:** P2 · **Dependencies:** TICKET-404
+**Status:** DONE · **Priority:** P2 · **Dependencies:** TICKET-404
 
 **Objective.** The feedback narrative without building the feedback loop.
 
 **Scope.** A single card computed from the run's real walk-away data: how many deals were refused and what cap would have closed them. **Not a scheduled job, not analytics.**
 
 **Acceptance criteria.**
-- The card's numbers are computed from actual ledger events, never hardcoded.
+- The card's numbers are computed from actual ledger events, never hardcoded. ✅ `apps/web/lib/walk-away-insight.ts` (`buildWalkAwayInsight`) derives every figure from `audit.getSessionLedger`: the terminal walk-away reason code, `roundsNegotiated` (count of `CANDIDATES_EVALUATED` events), `offersRefused` (count of `BUYER_DECLINES` events), `campaignFundedUpToMinor` (max `campaignSpendMinor` over `DILUTION_WITHIN_CAPS` events), and the "what cap would have closed it" figure read straight off the walk-away event's payload. Returns `null` (card does not render) unless the session's last event lands in `WALKED_AWAY`. The card lives on the audit page (`apps/web/app/merchant/sessions/[sessionId]/audit/walk-away-insight-card.tsx`), reusing the audit trail's own `audit.getSessionLedger` query key so it adds no fetch. Money stays in minor units through the shaper; `WalkAwayInsightCardView` formats.
 
-**Tests required.** Card figures match ledger contents.
+**Tests required.** Card figures match ledger contents. ✅ `apps/web/tests/walk-away-insight.test.tsx` (8 tests, props-only happy-dom render, ISSUE-018 — no new backend seam) drives the PRD §18.2 walk-away ledger (bundle refused → Tier 2 funded at the cap → round-3 ask exceeds the cap → walk away) and asserts every card figure equals what the ledger holds, plus the four `capOutcome` branches (cap-would-have-closed, budget-bound, shortfall-unrecorded, not-cap-related), the `MINT_ATTEMPTED` payload path, and the "not walked away → no card" case. `packages/trpc/tests/walk-away-economics.test.ts` (5 tests) covers the pure summariser.
+
+**Implementation notes (2026-09-06).**
+- No frozen contract changed. The two walk-away audit-event payloads in `packages/trpc/server/routes/negotiation/route.ts` now also carry the round's economic facts (`perDealCapMinor`, `availableCampaignBudgetMinor`, `smallestRescueShortfallMinor` on the `CANDIDATES_GENERATED → WALKED_AWAY` event; `requiredCampaignSpendMinor` + `perDealCapMinor` on the `MINT_ATTEMPTED` event). The `audit_events.payload` column is a free-form `z.record` — this adds keys to a value, not a field to a frozen schema, and no router `.input()` / `.output()` signature changed. PRD §20 explicitly says the ledger holds the walk-away shortfall; this is that.
+- The summariser (`summarizeWalkAwayEconomics`, `packages/trpc/server/routes/negotiation/walk-away-economics.ts`) is a pure reduction over the engine's own `generateCandidates` output — it prices nothing and decides nothing.
+- **ISSUE-022** raised: the `propose` path collapses every cap/budget walk-away to `NO_FEASIBLE_BASKET`, so §15/§17's `DILUTION_EXCEEDS_PER_DEAL_CAP` code is (almost) never emitted. Worked around here — the card keys off the recorded economics, not the reason code alone — not fixed (it's a `packages/policy` `tiering.ts` change).
+- CodeAnt review follow-ups (2026-09-06): (1) `roundsNegotiated` counts `CANDIDATES_GENERATED` events by `eventType`, not `reasonCode === "CANDIDATES_EVALUATED"` — the walk-away round's event is `NO_FEASIBLE_BASKET`, so counting by reason code lost the final round. (2) `smallestRescueShortfallMinor` is recorded as `null` unless `session.tier1Refused` — a Tier 2 candidate locked behind a missing Tier 1 refusal (RA-2) is not unlockable by a cap change, so it must not drive a "raise the cap" claim. (3) `resolveCapOutcome` now trusts the authoritative reason code first (`CAMPAIGN_BUDGET_EXHAUSTED` → budget-bound, `DILUTION_EXCEEDS_PER_DEAL_CAP` → cap) before falling back to the recorded economics for `NO_FEASIBLE_BASKET`; the `MINT_ATTEMPTED` payload also carries `availableCampaignBudgetMinor` now.
+- Follows ISSUE-020's pattern: the card's container uses the existing unauthenticated `audit.getSessionLedger` `publicProcedure`; no new procedure, no one-off auth check.
 
 **Affected.** `apps/web`, `packages/trpc`
 

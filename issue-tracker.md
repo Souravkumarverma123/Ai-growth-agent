@@ -69,6 +69,80 @@ An issue touching any of these is **CRITICAL** by default. Full list in `PRD.md`
 
 ## Open issues
 
+## ISSUE-022 — the `propose` path collapses every cap/budget walk-away to `NO_FEASIBLE_BASKET`, so PRD §15/§17's `DILUTION_EXCEEDS_PER_DEAL_CAP` / `CAMPAIGN_BUDGET_EXHAUSTED` codes are (almost) never emitted
+
+Status: OPEN
+Severity: MEDIUM
+Found in: TICKET-508 (walk-away policy-change card)
+Date: 2026-09-06
+Violates invariant: none in PRD §21 directly — but it contradicts PRD §15's
+transition table and §17 scenario 3 ("Buyer requests a deal exceeding the
+per-deal cap → Walk away … `DILUTION_EXCEEDS_PER_DEAL_CAP`").
+
+### Problem
+
+PRD §15 has two distinct `MINT_ATTEMPTED → WALKED_AWAY` rows —
+`DILUTION_EXCEEDS_PER_DEAL_CAP` (shortfall > per-deal cap) and
+`CAMPAIGN_BUDGET_EXHAUSTED` (shortfall > available budget) — and §18.2's
+worked example ends on the first of these.
+
+But `assignTiersAndFeasibility`
+(`packages/policy/generation/tiering.ts`) returns only
+`{ feasible: false, reasonCode: "NO_FEASIBLE_BASKET" }` whenever
+`selectableCandidates` is empty, regardless of *why* each Tier 2 candidate
+was ruled out (`markCandidate` computes the per-candidate
+`infeasibleReason`, then the whole-set result throws it away). The `propose`
+route (`packages/trpc/server/routes/negotiation/route.ts`) therefore writes
+`NO_FEASIBLE_BASKET` on the common cap-bound walk-away. `DILUTION_EXCEEDS_PER_DEAL_CAP`
+is only reachable on the rare `MINT_REJECTED` reservation-race path
+(`resolveMintAttemptedTransition`), never on the ordinary "round 3, buyer's
+ask needs more than the cap" path §18.2 describes.
+
+### Impact
+
+- The audit trail shows `NO_FEASIBLE_BASKET` where §18.2 leads a judge to
+  expect `DILUTION_EXCEEDS_PER_DEAL_CAP`.
+- TICKET-508's walk-away card cannot key off the reason code alone to know a
+  cap was the binding limit — it has to read the recorded economics
+  (`smallestRescueShortfallMinor` vs `perDealCapMinor` vs
+  `availableCampaignBudgetMinor`) and decide. It does exactly that, so the
+  card is still correct, but the reason-code granularity §15 promises is
+  missing from the ledger.
+
+### Worked around in TICKET-508 (not fixed)
+
+The walk-away audit payloads now carry the raw economic facts of the round
+(`perDealCapMinor`, `availableCampaignBudgetMinor`,
+`smallestRescueShortfallMinor` on the `CANDIDATES_GENERATED → WALKED_AWAY`
+event; `requiredCampaignSpendMinor` + `perDealCapMinor` on the
+`MINT_ATTEMPTED` event) — PRD §20: "the ledger holds every walk-away code
+**and shortfall**." That is enough for the card to distinguish
+"a higher cap would have closed it" from "the budget was the binding limit".
+The reason-code split itself is untouched.
+
+### Fix
+
+Its own ticket, in `packages/policy` (out of TICKET-508's `apps/web` /
+`packages/trpc` scope): have `assignTiersAndFeasibility` surface the binding
+`infeasibleReason` (the closest-to-feasible Tier 2 candidate's reason) on the
+infeasible result, and have `resolveCandidatesGeneratedTransition` /
+the route pick `DILUTION_EXCEEDS_PER_DEAL_CAP` /
+`CAMPAIGN_BUDGET_EXHAUSTED` / `NO_FEASIBLE_BASKET` accordingly. No frozen
+contract changes (all three codes already exist; the transition rows already
+exist).
+
+### Related Ticket
+
+TICKET-508 (found), TICKET-104 (`tiering.ts`), TICKET-204 (the write path),
+TICKET-402 (`resolveCandidatesGeneratedTransition`). Adjacent to ISSUE-017
+(the seeded ₹200 cap can't produce §18.2's Tier 2 offer at all).
+
+### Status History
+
+- 2026-09-06: OPEN — recorded while building the TICKET-508 walk-away card.
+
+---
+
 ## ISSUE-021 — the deployed engine's `CANDIDATES_EVALUATED` ledger payload omits the `feasible` count that PRD §8 says it records
 
 Status: OPEN
